@@ -80,13 +80,7 @@ python app.py
 
 ### 配置 API Key
 
-使用统一 AtlasCloud 密钥：
-
-```powershell
-$env:ATLASCLOUD_API_KEY="your-api-key"
-```
-
-也可以分别配置：
+可以分别配置：
 
 ```powershell
 $env:TEXT_MODEL_API_KEY="your-text-key"

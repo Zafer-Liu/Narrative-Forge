@@ -80,13 +80,7 @@ Then open <http://127.0.0.1:8000>.
 
 ### API Keys
 
-To use a shared AtlasCloud key:
-
-```powershell
-$env:ATLASCLOUD_API_KEY="your-api-key"
-```
-
-Separate provider keys are also supported:
+Separate provider keys are supported:
 
 ```powershell
 $env:TEXT_MODEL_API_KEY="your-text-key"

@@ -9,8 +9,7 @@
   [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
   [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows)](#quick-start)
   [![Download](https://img.shields.io/badge/download-Windows%20installer-5AC39A?logo=windows)](release/NarrativeForge-Setup.exe?raw=1)
-  [![License](https://img.shields.io/badge/license-not%20selected-lightgrey)](#license)
-
+  [![License](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)](#license)
   [简体中文](README.md) · **English**
 </div>
 

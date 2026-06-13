@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+.DS_Store
+projects/
+.venv/
+installer/
+development.md

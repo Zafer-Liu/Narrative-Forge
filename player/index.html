@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Narrative Forge 互动影游</title>
+  <link rel="icon" type="image/png" href="logo.png">
+  <link rel="stylesheet" href="player.css">
+</head>
+<body>
+  <main id="app" class="app" data-aspect="16:9">
+    <section id="landing" class="landing">
+      <img class="landing-logo" src="logo.png" alt="Narrative Forge logo">
+      <small id="genre"></small><h1 id="title">互动影游</h1><p id="synopsis"></p>
+      <button id="startBtn" class="primary">开始体验</button>
+    </section>
+    <section id="game" class="game" hidden>
+      <header><div class="scene-heading"><img class="header-logo" src="logo.png" alt=""><div><small id="progress"></small><strong id="sceneTitle"></strong></div></div><div><button id="restartBtn">重新开始</button><button id="fullscreenBtn">全屏</button></div></header>
+      <div id="stage" class="stage"></div>
+      <article class="story"><p id="action"></p><blockquote id="dialogue"></blockquote><div id="choices" class="choices"></div></article>
+    </section>
+  </main>
+  <script src="project-data.js"></script>
+  <script src="player.js"></script>
+</body>
+</html>

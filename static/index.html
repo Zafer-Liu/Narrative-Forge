@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Narrative Forge（叙事锻造工坊）</title>
+  <link rel="icon" type="image/png" href="/logo.png?v=17">
+  <link rel="stylesheet" href="/style.css?v=17">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img class="brand-logo" src="/logo.png?v=17" alt="Narrative Forge logo" width="44" height="44">
+      <div><strong>Narrative Forge</strong><small id="brandSubtitle">叙事锻造工坊</small></div>
+    </div>
+    <div class="mode-switcher">
+      <button id="modeInteractiveBtn" class="mode-tab active" data-mode="interactive">
+        <span class="mode-icon">⑆</span>互动影游
+      </button>
+      <button id="modeSerialBtn" class="mode-tab" data-mode="serial">
+        <span class="mode-icon">▶</span>AI 短剧
+      </button>
+    </div>
+    <div class="top-actions">
+      <span id="apiStatus" class="status-pill">检测服务中</span>
+      <button id="browseTreeBtn" class="button ghost">剧情树</button>
+      <button id="previewStoryBtn" class="button primary" data-interactive-only>试玩剧情</button>
+      <button id="previewSerialBtn" class="button primary" data-serial-only hidden>预览短剧</button>
+      <button id="exportPlayerBtn" class="button ghost">导出试玩包</button>
+      <button id="openProjectFolderBtn" class="button ghost">打开项目文件夹</button>
+      <button id="importBtn" class="button ghost">导入项目</button>
+      <button id="saveProjectBtn" class="button ghost">保存项目</button>
+      <button id="exportBtn" class="button ghost">导出 JSON</button>
+      <input id="importInput" type="file" accept="application/json" hidden>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <aside class="project-panel panel">
+      <div class="panel-title"><span>01</span><h2>项目设定</h2></div>
+      <label>片名<input id="projectTitle" value="星海回声" maxlength="80"></label>
+      <label>故事梗概<textarea id="projectSynopsis" rows="5">一名失忆的领航员在废弃空间站醒来，必须在空间站坠入恒星前找回身份，并决定是否唤醒沉睡的人工智能。</textarea></label>
+      <div class="field-row">
+        <label>类型<select id="projectGenre"><option>科幻悬疑</option><option>奇幻冒险</option><option>都市情感</option><option>恐怖生存</option><option>历史传奇</option></select></label>
+        <label>画幅<select id="projectAspect"><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option><option value="1:1">1:1 方形</option></select></label>
+      </div>
+      <label>视觉风格<textarea id="projectStyle" rows="3">电影级写实科幻，深蓝与琥珀色调，体积光，精密机械细节，统一角色设计</textarea></label>
+      <label>主角设定<textarea id="projectCharacter" rows="3">林默，28岁亚洲女性领航员，黑色短发，左眉有细小伤痕，穿旧白色宇航服与橙色生命维持背包</textarea></label>
+
+      <!-- 互动影游专属 -->
+      <div id="interactiveSettings" class="mode-section">
+        <div class="field-row">
+          <label>剧情树深度<select id="projectTreeDepth"><option value="2">2 层</option><option value="3" selected>3 层</option><option value="4">4 层</option><option value="5">5 层</option></select></label>
+          <label>每节点分支<select id="projectBranchCount"><option value="2" selected>2 个</option><option value="3">3 个</option><option value="4">4 个</option></select></label>
+        </div>
+        <div id="treeEstimate" class="tree-estimate"></div>
+      </div>
+
+      <!-- AI短剧专属 -->
+      <div id="serialSettings" class="mode-section" hidden>
+        <div class="field-row">
+          <label>计划集数<select id="projectEpisodeCount"><option value="3">3 集</option><option value="5" selected>5 集</option><option value="8">8 集</option><option value="12">12 集</option><option value="20">20 集</option></select></label>
+          <label>默认每集镜头<select id="projectShotsPerEpisode"><option value="5">5 个</option><option value="8">8 个</option><option value="10">10 个</option><option value="12" selected>12 个</option><option value="15">15 个</option><option value="20">20 个</option><option value="30">30 个</option></select></label>
+        </div>
+        <div id="serialEstimate" class="tree-estimate"></div>
+        <label>剧情风格
+          <select id="projectSerialTone">
+            <option value="drama">情感正剧</option>
+            <option value="thriller">悬疑惊悚</option>
+            <option value="comedy">轻喜剧</option>
+            <option value="action">动作冒险</option>
+            <option value="romance">爱情甜宠</option>
+          </select>
+        </label>
+        <button id="syncEpisodesBtn" class="button ghost wide">按计划集数同步分集</button>
+        <section class="episode-workspace">
+          <div class="episode-heading"><strong>分集管理</strong><button id="addEpisodeBtn" class="text-button">＋ 新增一集</button></div>
+          <div id="episodeList" class="episode-list"></div>
+          <div id="episodeSettings" class="episode-settings">
+            <label>本集标题<input id="episodeTitle" maxlength="80"></label>
+            <label>本集剧情梗概<textarea id="episodeSynopsis" rows="3" maxlength="3000"></textarea></label>
+            <label>本集叙事目标<textarea id="episodeObjective" rows="2" maxlength="1500" placeholder="本集需要推进什么人物关系或主线信息"></textarea></label>
+            <label>开场钩子<textarea id="episodeHook" rows="2" maxlength="1200" placeholder="前几秒吸引观众继续观看的事件"></textarea></label>
+            <label>高潮与结尾<textarea id="episodeEnding" rows="2" maxlength="1500" placeholder="本集高潮、反转或下一集悬念"></textarea></label>
+            <div class="field-row">
+              <label>目标镜头数<select id="episodeShotCount"><option value="5">5 个</option><option value="8">8 个</option><option value="10">10 个</option><option value="12">12 个</option><option value="15">15 个</option><option value="20">20 个</option><option value="30">30 个</option></select><small class="hint">建议 12-20 镜；一镜只承载一个剧情节拍。</small></label>
+              <label>分集操作<button id="deleteEpisodeBtn" class="button danger ghost wide episode-delete">删除当前集</button></label>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <details class="model-settings" open>
+        <summary>模型供应商配置</summary>
+        <section class="provider-settings">
+          <strong>文本模型</strong><small>OpenAI Chat Completions 兼容</small>
+          <label>API 根地址<input id="projectTextBaseUrl" value="https://api.atlascloud.ai/v1" maxlength="1000" spellcheck="false"></label>
+          <label>模型 ID<input id="projectTextModel" value="deepseek-v3" maxlength="200" spellcheck="false"></label>
+          <label>API Key（仅本次会话）<input id="projectTextApiKey" type="password" maxlength="2000" autocomplete="off" placeholder="留空使用 TEXT_MODEL_API_KEY 或 ATLASCLOUD_API_KEY"></label>
+          <button id="testTextProviderBtn" class="button ghost wide provider-test">测试文本模型连接</button>
+        </section>
+        <section class="provider-settings">
+          <strong>文生图模型</strong><small>AtlasCloud 异步生成协议兼容</small>
+          <label>API 根地址<input id="projectImageBaseUrl" value="https://api.atlascloud.ai/api/v1/model" maxlength="1000" spellcheck="false"></label>
+          <label>模型 ID<input id="projectImageModel" value="openai/gpt-image-2/text-to-image" maxlength="200" spellcheck="false"></label>
+          <label>参考图编辑模型（可选）<input id="projectImageEditModel" value="openai/gpt-image-2/edit" maxlength="200" spellcheck="false"></label>
+          <label>API Key（仅本次会话）<input id="projectImageApiKey" type="password" maxlength="2000" autocomplete="off" placeholder="留空使用 IMAGE_MODEL_API_KEY 或 ATLASCLOUD_API_KEY"></label>
+        </section>
+        <section class="provider-settings">
+          <strong>图生视频模型</strong><small>AtlasCloud 异步生成协议兼容</small>
+          <label>API 根地址<input id="projectVideoBaseUrl" value="https://api.atlascloud.ai/api/v1/model" maxlength="1000" spellcheck="false"></label>
+          <label>模型 ID<input id="projectVideoModel" value="xai/grok-imagine-video-v1.5/image-to-video" maxlength="200" spellcheck="false"></label>
+          <label>API Key（仅本次会话）<input id="projectVideoApiKey" type="password" maxlength="2000" autocomplete="off" placeholder="留空使用 VIDEO_MODEL_API_KEY 或 ATLASCLOUD_API_KEY"></label>
+        </section>
+      </details>
+      <button id="draftBtn" class="button primary wide">使用文本模型生成</button>
+      <button id="localDraftBtn" class="button ghost wide secondary-draft">使用本地模板生成</button>
+      <p class="hint" id="draftHint">三类模型可分别使用不同供应商。图片和视频供应商需兼容 generateImage / generateVideo / prediction 异步协议。</p>
+    </aside>
+
+    <section class="storyboard panel">
+      <div class="panel-title row-title">
+        <div><span>02</span><h2 id="storyboardTitle">分镜列表</h2></div>
+        <div class="storyboard-actions">
+          <!-- 互动影游专属 -->
+          <span id="interactiveListActions">
+            <button id="addSceneBtn" class="icon-button" title="添加镜头">＋</button>
+          </span>
+          <!-- AI短剧专属 -->
+          <span id="serialListActions" hidden>
+            <select id="serialEpisodeFilter" class="episode-filter"></select>
+            <button id="addSerialSceneBtn" class="icon-button" title="添加镜头">＋</button>
+          </span>
+        </div>
+      </div>
+      <div id="sceneList" class="scene-list" title="拖拽分镜可改变展示顺序"></div>
+    </section>
+
+    <section class="editor panel">
+      <div class="panel-title row-title">
+        <div><span>03</span><h2>镜头导演台</h2></div>
+        <div class="editor-actions"><button id="openSceneFolderBtn" class="button ghost">打开素材文件夹</button><button id="deleteSceneBtn" class="button danger ghost">删除镜头</button></div>
+      </div>
+      <div id="emptyState" class="empty-state">先生成草案或添加一个镜头。</div>
+      <div id="sceneEditor" hidden>
+        <div class="field-row triple">
+          <label>镜头标题<input id="sceneTitle" maxlength="80"></label>
+          <label>景别<select id="sceneShot"><option>大全景</option><option>全景</option><option>中景</option><option>近景</option><option>特写</option></select></label>
+          <label>时长<select id="sceneDuration"><option value="4">4 秒</option><option value="6">6 秒</option><option value="8" selected>8 秒</option><option value="10">10 秒</option><option value="12">12 秒</option><option value="15">15 秒</option></select></label>
+        </div>
+        <label>剧情与表演<textarea id="sceneAction" rows="3"></textarea></label>
+        <label>对白 / 旁白<textarea id="sceneDialogue" rows="2"></textarea><small id="dialogueTimingHint" class="dialogue-timing-hint"></small></label>
+
+        <!-- 互动影游：剧情走向 -->
+        <div class="flow-block" id="flowBlock">
+          <div class="prompt-heading">
+            <div><h3>剧情走向</h3><p>没有选择时自动进入下一节点；有选择时由玩家决定。</p></div>
+            <div><button id="setStartSceneBtn" class="text-button">设为起点</button><button id="previewFromSceneBtn" class="text-button">从此节点试玩</button><button id="validateStoryBtn" class="text-button">检查分支</button></div>
+          </div>
+          <label>无选择时的下一镜头<select id="sceneNext"></select></label>
+          <div class="choice-heading"><strong>玩家选择</strong><button id="addChoiceBtn" class="button ghost">＋ 添加选择</button></div>
+          <div id="choiceList" class="choice-list"></div>
+          <p class="hint">添加选择后，"自动下一镜头"不会在试玩时生效。</p>
+        </div>
+
+        <!-- AI短剧：集/顺序信息 -->
+        <div class="serial-flow-block" id="serialFlowBlock" hidden>
+          <div class="prompt-heading">
+            <div><h3>短剧排序</h3><p>线性播放，无玩家选择。拖拽分镜列表可调整顺序。</p></div>
+          </div>
+          <div class="field-row">
+            <label>所属集数
+              <select id="sceneEpisode"></select>
+            </label>
+            <label>集内序号
+              <input id="sceneEpisodeOrder" type="number" min="1" max="999" value="1" style="margin-top:6px">
+            </label>
+          </div>
+          <div class="prompt-heading"><div><h3>镜头衔接</h3><p>约束上一镜结尾与当前镜开头，导出成片时同步应用转场。</p></div><button id="rebuildTransitionsBtn" class="text-button">重建本集衔接</button></div>
+          <label>与上一镜转场
+            <select id="sceneTransition"><option value="match">动作匹配</option><option value="dissolve">柔和淡变</option><option value="cut">直接切换</option><option value="fade">淡入淡出</option></select>
+          </label>
+          <label>进入状态<textarea id="sceneEntryState" rows="2" placeholder="承接上一镜时，人物姿势、视线、位置、道具和环境状态"></textarea></label>
+          <label>离开状态<textarea id="sceneExitState" rows="2" placeholder="本镜结束时保留给下一镜的姿势、视线、位置、道具和情绪"></textarea></label>
+        </div>
+
+        <div class="prompt-block">
+          <div class="prompt-heading"><h3>关键帧提示词</h3><button id="composeImagePrompt" class="text-button">根据设定重组</button></div>
+          <div class="reference-row">
+            <label>角色参考镜头<select id="sceneReference"></select></label>
+            <div id="referenceStatus" class="reference-status"></div>
+          </div>
+          <textarea id="sceneImagePrompt" rows="6"></textarea>
+          <div class="generate-row">
+            <div class="settings-inline">
+              <select id="imageQuality"><option value="high">高质量</option><option value="medium">中质量</option><option value="low">低质量</option></select>
+              <select id="imageFormat"><option value="jpeg">JPEG</option><option value="png">PNG</option></select>
+            </div>
+            <div class="generate-actions"><button id="resetImageBtn" class="button danger ghost">清除关键帧</button><button id="generateImageBtn" class="button primary">生成关键帧</button></div>
+          </div>
+        </div>
+
+        <div class="media-card" id="imageCard">
+          <div class="media-placeholder">关键帧将在这里出现</div>
+        </div>
+
+        <div class="prompt-block">
+          <div class="prompt-heading"><h3>运镜与动态提示词</h3><button id="composeVideoPrompt" class="text-button">根据镜头重组</button></div>
+          <textarea id="sceneVideoPrompt" rows="5"></textarea>
+          <div class="generate-row">
+            <div class="settings-inline"><select id="videoResolution"><option value="720p">720p</option><option value="480p">480p</option></select></div>
+            <div class="generate-actions"><button id="resetVideoBtn" class="button danger ghost">清除视频</button><button id="generateVideoBtn" class="button primary">由关键帧生成视频</button></div>
+          </div>
+        </div>
+
+        <div class="media-card" id="videoCard">
+          <div class="media-placeholder">视频将在这里出现</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 剧情树弹窗（互动影游 & 短剧通用，短剧模式下为线性视图） -->
+  <div id="treeModal" class="tree-modal" hidden>
+    <div class="tree-backdrop"></div>
+    <section id="treeBrowser" class="tree-browser" role="dialog" aria-modal="true" aria-label="剧情树浏览器">
+      <header class="tree-browser-header">
+        <div><small id="treeBrowserMode">剧情结构</small><strong id="treeBrowserTitle">剧情树</strong></div>
+        <div class="tree-tools">
+          <span id="treeStats"></span>
+          <button id="treeZoomOutBtn" class="button ghost">−</button>
+          <button id="treeZoomResetBtn" class="button ghost">100%</button>
+          <button id="treeZoomInBtn" class="button ghost">＋</button>
+          <button id="treeFullscreenBtn" class="button ghost">全屏</button>
+          <button id="closeTreeBtn" class="icon-button">×</button>
+        </div>
+      </header>
+      <div id="treeViewport" class="tree-viewport">
+        <div id="treeCanvas" class="tree-canvas">
+          <svg id="treeEdges" class="tree-edges"></svg>
+          <div id="treeNodes" class="tree-nodes"></div>
+        </div>
+      </div>
+      <footer class="tree-legend">
+        <span id="legendInteractive"><i class="legend-start"></i>起点</span>
+        <span id="legendChoice"><i class="legend-choice"></i>分支节点</span>
+        <span id="legendEnding"><i class="legend-ending"></i>结局</span>
+        <span id="legendSerial" hidden><i class="legend-serial"></i>短剧镜头</span>
+        <span>单击节点定位，双击返回编辑器</span>
+        <span class="tree-legend-hint" id="treePanHint">· 拖拽空白区域平移视图</span>
+      </footer>
+    </section>
+  </div>
+
+  <!-- 互动影游试玩弹窗 -->
+  <div id="storyModal" class="story-modal" hidden>
+    <div class="story-backdrop"></div>
+    <section id="storyPlayer" class="story-player" role="dialog" aria-modal="true" aria-label="分支剧情试玩">
+      <header class="story-player-header">
+        <div><small>互动影游试玩</small><strong id="playerProjectTitle"></strong></div>
+        <div><button id="restartStoryBtn" class="button ghost">重新开始</button><button id="fullscreenStoryBtn" class="button ghost">进入全屏</button><button id="closeStoryBtn" class="icon-button">×</button></div>
+      </header>
+      <div id="playerStage" class="player-stage"></div>
+      <div class="player-copy">
+        <span id="playerProgress" class="player-progress"></span>
+        <h2 id="playerSceneTitle"></h2>
+        <p id="playerAction"></p>
+        <blockquote id="playerDialogue"></blockquote>
+        <div id="playerChoices" class="player-choices"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- AI短剧预览弹窗 -->
+  <div id="serialModal" class="story-modal" hidden>
+    <div class="serial-backdrop"></div>
+    <section id="serialPlayer" class="story-player serial-player" role="dialog" aria-modal="true" aria-label="AI短剧预览">
+      <header class="story-player-header">
+        <div>
+          <small>AI 短剧预览</small>
+          <strong id="serialPlayerTitle"></strong>
+        </div>
+        <div class="serial-player-controls">
+          <span id="serialProgress" class="serial-progress"></span>
+          <button id="serialPrevBtn" class="button ghost">‹ 上一镜</button>
+          <button id="serialNextBtn" class="button ghost">下一镜 ›</button>
+          <button id="serialRestartBtn" class="button ghost">重播</button>
+          <button id="serialAutoPlayBtn" class="button ghost">▶ 自动播放</button>
+          <button id="fullscreenSerialBtn" class="button ghost">全屏</button>
+          <button id="closeSerialBtn" class="icon-button">×</button>
+        </div>
+      </header>
+      <div id="serialStage" class="player-stage"></div>
+      <div class="player-copy serial-copy">
+        <div class="serial-ep-tag" id="serialEpTag"></div>
+        <h2 id="serialSceneTitle"></h2>
+        <p id="serialAction"></p>
+        <blockquote id="serialDialogue"></blockquote>
+      </div>
+    </section>
+  </div>
+
+  <div id="mediaPreviewModal" class="media-preview-modal" hidden>
+    <div class="media-preview-backdrop"></div>
+    <section class="media-preview-dialog" role="dialog" aria-modal="true" aria-label="素材预览">
+      <header>
+        <strong id="mediaPreviewTitle">素材预览</strong>
+        <div><a id="mediaPreviewExternal" class="button ghost" target="_blank" rel="noopener">新窗口打开</a><button id="closeMediaPreviewBtn" class="icon-button" aria-label="关闭素材预览">×</button></div>
+      </header>
+      <div id="mediaPreviewStage" class="media-preview-stage"></div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/feature-registry.js?v=17"></script>
+  <script src="/episode-model.js?v=17"></script>
+  <script src="/app.js?v=17"></script>
+  <script src="/publish-feature.js?v=17"></script>
+</body>
+</html>

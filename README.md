@@ -9,7 +9,7 @@
   [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
   [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows)](#快速开始)
   [![Download](https://img.shields.io/badge/download-Windows%20installer-5AC39A?logo=windows)](release/NarrativeForge-Setup.exe?raw=1)
-  [![License](https://img.shields.io/badge/license-not%20selected-lightgrey)](#许可证)
+  [![License]([![License](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)](#license))](#许可证)
 
   **简体中文** · [English](README_EN.md)
 </div>

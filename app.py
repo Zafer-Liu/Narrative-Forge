@@ -1096,8 +1096,9 @@ class DirectorHandler(SimpleHTTPRequestHandler):
 
 
 def main():
-    host = os.environ.get("DIRECTOR_HOST", "127.0.0.1")
-    port = int(os.environ.get("DIRECTOR_PORT", "8000"))
+    railway_port = os.environ.get("PORT", "").strip()
+    host = os.environ.get("DIRECTOR_HOST", "0.0.0.0" if railway_port else "127.0.0.1")
+    port = int(os.environ.get("DIRECTOR_PORT", railway_port or "8000"))
     server = ThreadingHTTPServer((host, port), DirectorHandler)
     print(f"Narrative Forge（叙事锻造工坊）：http://{host}:{port}", flush=True)
     print("默认模型密钥：" + ("已配置" if os.environ.get("ATLASCLOUD_API_KEY") else "未配置"), flush=True)

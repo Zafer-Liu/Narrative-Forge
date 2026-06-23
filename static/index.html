@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Narrative Forge（叙事锻造工坊）</title>
   <link rel="icon" type="image/png" href="/logo.png?v=17">
-  <link rel="stylesheet" href="/style.css?v=19">
+  <link rel="stylesheet" href="/style.css?v=20">
 </head>
 <body>
   <header class="topbar">
@@ -39,6 +39,16 @@
   <main class="workspace">
     <aside class="project-panel panel">
       <div class="panel-title"><span>01</span><h2>项目设定</h2></div>
+      <section class="example-card">
+        <div>
+          <strong>星海回声</strong>
+          <span>内置互动影游案例与完整试玩包</span>
+        </div>
+        <div class="example-actions">
+          <button id="loadExampleBtn" class="button ghost">加载项目</button>
+          <a class="button primary" href="/samples/star-sea-echo-player/index.html" target="_blank" rel="noopener">试玩完整包</a>
+        </div>
+      </section>
       <label>片名<input id="projectTitle" value="星海回声" maxlength="80"></label>
       <label>故事梗概<textarea id="projectSynopsis" rows="5">一名失忆的领航员在废弃空间站醒来，必须在空间站坠入恒星前找回身份，并决定是否唤醒沉睡的人工智能。</textarea></label>
       <div class="field-row">
@@ -325,7 +335,7 @@
   <div id="toast" class="toast" role="status"></div>
   <script src="/feature-registry.js?v=17"></script>
   <script src="/episode-model.js?v=17"></script>
-  <script src="/app.js?v=24"></script>
+  <script src="/app.js?v=25"></script>
   <script src="/publish-feature.js?v=18"></script>
 </body>
 </html>

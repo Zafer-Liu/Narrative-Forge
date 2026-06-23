@@ -1,0 +1,4 @@
+Narrative Forge（叙事锻造工坊）互动影游试玩包
+
+解压全部文件后，双击 index.html 开始试玩。
+请勿单独移动 index.html，assets 文件夹必须保持相对位置。

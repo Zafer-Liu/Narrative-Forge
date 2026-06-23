@@ -1606,6 +1606,7 @@ function closeTreeBrowser() {
   if (document.fullscreenElement === elements.treeBrowser) document.exitFullscreen().catch(() => {});
   elements.treeModal.hidden = true;
   document.body.classList.remove("modal-open");
+  renderEditor();
 }
 
 // 剧情树面板拖拽平移
@@ -1733,8 +1734,8 @@ function renderTreeBrowser() {
         node.innerHTML = `<small>${label}</small><strong>${escapeHtml(scene.title)}</strong><span class="node-assets${assetStatusClass}"><span class="asset-icon img">${imgDot}</span>图 <span class="asset-icon vid">${vidDot}</span>视频</span>`;
       }
 
-      node.addEventListener("click", () => { project.selectedSceneId = scene.selectSceneId || scene.id; saveProject(); renderTreeBrowser(); });
-      node.addEventListener("dblclick", () => { project.selectedSceneId = scene.selectSceneId || scene.id; saveProject(); closeTreeBrowser(); render(); });
+      node.addEventListener("click", () => { syncEditorToScene(); project.selectedSceneId = scene.selectSceneId || scene.id; renderEditor(); saveProject(); renderTreeBrowser(); });
+      node.addEventListener("dblclick", () => { syncEditorToScene(); project.selectedSceneId = scene.selectSceneId || scene.id; saveProject(); closeTreeBrowser(); render(); });
       if (!isGrouped) bindSceneDrag(node, scene.id, "tree", depthById);
       elements.treeNodes.appendChild(node);
     });
@@ -2119,11 +2120,11 @@ function closeMediaPreview() {
 }
 
 function proxyMediaUrl(url) {
-  if (!url || url.startsWith("/projects/")) return url;
+  if (!url || url.startsWith("/projects/") || url.startsWith("/samples/")) return url;
   return `/api/media?url=${encodeURIComponent(url)}`;
 }
 function downloadMediaUrl(url, filename) {
-  if (url?.startsWith("/projects/")) return url;
+  if (url?.startsWith("/projects/") || url?.startsWith("/samples/")) return url;
   return `/api/media?download=1&filename=${encodeURIComponent(filename)}&url=${encodeURIComponent(url)}`;
 }
 
@@ -2499,6 +2500,16 @@ async function importProject(file) {
     applyMetaToForm(); saveProject(); render(); showToast("项目已导入。");
   } catch (error) { showToast(error.message, true); }
 }
+async function loadBundledExample() {
+  try {
+    if (project.scenes.length && !confirm("加载内置案例会替换当前工作区项目。系统会保留一份可撤销快照，确定继续吗？")) return;
+    const example = await requestJson("/samples/star-sea-echo.project.json");
+    if (project.scenes.length) snapshotProjectBeforeReplacement("加载内置案例前");
+    project = normalizeProject(example);
+    applyMetaToForm(); saveProject(); render(); updateRecoveryButton();
+    showToast("已加载内置案例：星海回声。");
+  } catch (error) { showToast(`加载案例失败：${error.message}`, true); }
+}
 async function openAssetFolder(sceneId = "") {
   try {
     const result = await requestJson("/api/open-folder", { method: "POST", body: JSON.stringify({ project_title: readMetaFromForm().title, scene_id: sceneId }) });
@@ -2655,6 +2666,7 @@ function bindEvents() {
 
   // 项目管理
   $("#exportBtn").addEventListener("click", exportProject);
+  $("#loadExampleBtn").addEventListener("click", loadBundledExample);
   $("#saveProjectBtn").addEventListener("click", persistProject);
   $("#restoreProjectBtn").addEventListener("click", restoreProjectSnapshot);
   $("#importBtn").addEventListener("click", () => $("#importInput").click());

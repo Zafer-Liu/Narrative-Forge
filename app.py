@@ -699,6 +699,33 @@ class DirectorHandler(SimpleHTTPRequestHandler):
 
         self.serve_static(path)
 
+    def do_HEAD(self):
+        parsed_request = urlparse(self.path)
+        try:
+            path = unquote(parsed_request.path, errors="strict")
+        except UnicodeDecodeError:
+            self.send_error(400)
+            return
+        if path.startswith("/projects/"):
+            self.serve_project_file(path, head_only=True)
+            return
+        if path == "/api/health":
+            body = json.dumps({
+                "ok": True,
+                "version": APP_VERSION,
+                "keyConfigured": bool(os.environ.get("ATLASCLOUD_API_KEY", "").strip()),
+            }, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
+        if path.startswith("/api/"):
+            self.send_error(404)
+            return
+        self.serve_static(path, head_only=True)
+
     def do_POST(self):
         path = urlparse(self.path).path
         print(f"[POST] {path}", flush=True)
@@ -1012,7 +1039,7 @@ class DirectorHandler(SimpleHTTPRequestHandler):
             raise ApiError(500, f"无法打开文件夹：{exc}") from exc
         self.send_json(200, {"ok": True, "path": str(target)})
 
-    def serve_project_file(self, path):
+    def serve_project_file(self, path, head_only=False):
         relative = path.removeprefix("/projects/")
         target = (PROJECTS_DIR / relative).resolve()
         try:
@@ -1020,6 +1047,9 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         except ValueError:
             self.send_error(403)
             return
+        self.serve_file(target, head_only=head_only)
+
+    def serve_file(self, target, cache_control="no-cache", head_only=False):
         if not target.is_file():
             self.send_error(404)
             return
@@ -1051,8 +1081,10 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         self.send_header("Accept-Ranges", "bytes")
         if range_header:
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", cache_control)
         self.end_headers()
+        if head_only:
+            return
         try:
             with target.open("rb") as source:
                 source.seek(start)
@@ -1068,23 +1100,7 @@ class DirectorHandler(SimpleHTTPRequestHandler):
             # switching scenes, or reloading the video element.
             pass
 
-    def serve_file(self, target, cache_control="no-cache"):
-        if not target.is_file():
-            self.send_error(404)
-            return
-        content = target.read_bytes()
-        mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        try:
-            self.send_response(200)
-            self.send_header("Content-Type", f"{mime_type}; charset=utf-8" if mime_type.startswith("text/") or mime_type == "application/javascript" else mime_type)
-            self.send_header("Content-Length", str(len(content)))
-            self.send_header("Cache-Control", cache_control)
-            self.end_headers()
-            self.wfile.write(content)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            pass
-
-    def serve_static(self, path):
+    def serve_static(self, path, head_only=False):
         relative = "index.html" if path == "/" else path.lstrip("/")
         target = (STATIC_DIR / relative).resolve()
         try:
@@ -1092,17 +1108,17 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         except ValueError:
             self.send_error(403)
             return
-        self.serve_file(target)
+        self.serve_file(target, head_only=head_only)
 
 
 def main():
     railway_port = os.environ.get("PORT", "").strip()
     host = os.environ.get("DIRECTOR_HOST", "0.0.0.0" if railway_port else "127.0.0.1")
     port = int(os.environ.get("DIRECTOR_PORT", railway_port or "8000"))
-    server = ThreadingHTTPServer((host, port), DirectorHandler)
     print(f"Narrative Forge（叙事锻造工坊）：http://{host}:{port}", flush=True)
     print("默认模型密钥：" + ("已配置" if os.environ.get("ATLASCLOUD_API_KEY") else "未配置"), flush=True)
     print(f"版本：{APP_VERSION}", flush=True)
+    server = ThreadingHTTPServer((host, port), DirectorHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

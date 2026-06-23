@@ -316,6 +316,48 @@ class ServerValidationTests(unittest.TestCase):
         self.assertIn("错误 1010", context.exception.message)
         self.assertNotIn("secret", str(context.exception.details))
 
+    @patch("server.time.sleep")
+    @patch("server.requests.request")
+    def test_prediction_credit_limit_fails_without_retry(self, request, sleep):
+        response = request.return_value
+        response.ok = False
+        response.status_code = 500
+        response.json.return_value = {
+            "code": 403,
+            "message": "Your team has either used all available credits or reached its monthly spending limit.",
+            "data": {
+                "status": "failed",
+                "error": "Please purchase more credits or raise your spending limit.",
+            },
+        }
+        with patch.dict(os.environ, {"ATLASCLOUD_API_KEY": "secret"}, clear=True):
+            with self.assertRaises(server.ApiError) as context:
+                server.atlas_request("prediction/job-credit-limit")
+
+        self.assertEqual(context.exception.status, 402)
+        self.assertIn("额度已用尽", context.exception.message)
+        self.assertFalse(context.exception.details["retryable"])
+        self.assertEqual(request.call_count, 1)
+        sleep.assert_not_called()
+
+    @patch("server.time.sleep")
+    @patch("server.requests.request")
+    def test_prediction_nested_failed_status_fails_without_retry(self, request, sleep):
+        response = request.return_value
+        response.ok = False
+        response.status_code = 500
+        response.json.return_value = {
+            "data": {"status": "failed", "error": "Model rejected the task."},
+        }
+        with patch.dict(os.environ, {"ATLASCLOUD_API_KEY": "secret"}, clear=True):
+            with self.assertRaises(server.ApiError) as context:
+                server.atlas_request("prediction/job-failed")
+
+        self.assertIn("任务已失败", context.exception.message)
+        self.assertFalse(context.exception.details["retryable"])
+        self.assertEqual(request.call_count, 1)
+        sleep.assert_not_called()
+
 
 class ServerIntegrationTests(unittest.TestCase):
     @classmethod
@@ -383,8 +425,38 @@ class ServerIntegrationTests(unittest.TestCase):
                     payload = json.load(response)
                 saved = Path(directory) / "星海回声" / "project.json"
                 self.assertTrue(payload["ok"])
+                self.assertEqual(payload["backupPath"], "")
                 self.assertTrue(saved.is_file())
                 self.assertEqual(json.loads(saved.read_text(encoding="utf-8")), project)
+                changed = {"meta": {"title": "星海回声"}, "scenes": [{"id": "scene-2"}]}
+                second_request = urllib.request.Request(
+                    f"{self.base_url}/api/save-project",
+                    data=json.dumps({"project": changed}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}, method="POST",
+                )
+                with urllib.request.urlopen(second_request) as response:
+                    second_payload = json.load(response)
+                backup = Path(second_payload["backupPath"])
+                self.assertTrue(backup.is_file())
+                self.assertEqual(json.loads(backup.read_text(encoding="utf-8")), project)
+
+    def test_resolve_asset_path_restores_project_media(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            projects = root / "projects"
+            image = projects / "星海回声" / "assets" / "scene-1" / "image.jpg"
+            image.parent.mkdir(parents=True)
+            image.write_bytes(b"JPEG")
+            request = urllib.request.Request(
+                f"{self.base_url}/api/resolve-asset-path",
+                data=json.dumps({"path": str(image), "kind": "image"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with patch("server.ROOT", root), patch("server.PROJECTS_DIR", projects):
+                with urllib.request.urlopen(request) as response:
+                    payload = json.load(response)
+            self.assertEqual(payload["localUrl"], "/projects/星海回声/assets/scene-1/image.jpg")
+            self.assertEqual(Path(payload["path"]), image)
 
     def test_export_player_builds_offline_zip_without_provider_secrets(self):
         with tempfile.TemporaryDirectory() as directory:

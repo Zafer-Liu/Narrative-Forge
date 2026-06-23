@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Narrative Forge（叙事锻造工坊）</title>
   <link rel="icon" type="image/png" href="/logo.png?v=17">
-  <link rel="stylesheet" href="/style.css?v=17">
+  <link rel="stylesheet" href="/style.css?v=19">
 </head>
 <body>
   <header class="topbar">
@@ -30,6 +30,7 @@
       <button id="openProjectFolderBtn" class="button ghost">打开项目文件夹</button>
       <button id="importBtn" class="button ghost">导入项目</button>
       <button id="saveProjectBtn" class="button ghost">保存项目</button>
+      <button id="restoreProjectBtn" class="button ghost" hidden>撤销覆盖</button>
       <button id="exportBtn" class="button ghost">导出 JSON</button>
       <input id="importInput" type="file" accept="application/json" hidden>
     </div>
@@ -53,6 +54,16 @@
           <label>剧情树深度<select id="projectTreeDepth"><option value="2">2 层</option><option value="3" selected>3 层</option><option value="4">4 层</option><option value="5">5 层</option></select></label>
           <label>每节点分支<select id="projectBranchCount"><option value="2" selected>2 个</option><option value="3">3 个</option><option value="4">4 个</option></select></label>
         </div>
+        <label>每剧情节点分镜
+          <select id="projectInteractiveShotsPerNode">
+            <option value="1" selected>1 镜（传统节点）</option>
+            <option value="2">2 镜拼接</option>
+            <option value="3">3 镜拼接</option>
+            <option value="4">4 镜拼接</option>
+            <option value="5">5 镜拼接</option>
+          </select>
+          <small class="hint">用于把一个互动剧情段拆成多个最长 15 秒的连续镜头，只在最后一镜显示玩家选择。</small>
+        </label>
         <div id="treeEstimate" class="tree-estimate"></div>
       </div>
 
@@ -314,7 +325,7 @@
   <div id="toast" class="toast" role="status"></div>
   <script src="/feature-registry.js?v=17"></script>
   <script src="/episode-model.js?v=17"></script>
-  <script src="/app.js?v=17"></script>
-  <script src="/publish-feature.js?v=17"></script>
+  <script src="/app.js?v=24"></script>
+  <script src="/publish-feature.js?v=18"></script>
 </body>
 </html>

@@ -3,6 +3,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import ipaddress
 import socket
 import threading
@@ -10,6 +11,7 @@ import time
 import xml.etree.ElementTree as ET
 import subprocess
 import uuid
+from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -40,7 +42,7 @@ KNOWN_MEDIA_HOSTS = {
     "atlas-img.oss-us-west-1.aliyuncs.com",
 }
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
-APP_VERSION = "2026.06.13-static-logo-v17"
+APP_VERSION = "2026.06.22-minimax-fix-v24"
 
 
 class ApiError(Exception):
@@ -49,6 +51,82 @@ class ApiError(Exception):
         self.status = status
         self.message = message
         self.details = details
+
+
+def provider_error_text(value):
+    """Collect provider error text from inconsistent nested response shapes."""
+    parts = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key.lower() in {"message", "error", "detail", "title", "msg"}:
+                if isinstance(item, (str, int, float)):
+                    parts.append(str(item))
+                else:
+                    parts.extend(provider_error_text(item))
+            elif isinstance(item, (dict, list)):
+                parts.extend(provider_error_text(item))
+    elif isinstance(value, list):
+        for item in value:
+            parts.extend(provider_error_text(item))
+    return parts
+
+
+def fatal_provider_error(status, details, provider_name):
+    if not isinstance(details, dict):
+        return None
+    text = " ".join(provider_error_text(details)).strip()
+    normalized = text.lower()
+    credit_markers = (
+        "used all available credits",
+        "monthly spending limit",
+        "purchase more credits",
+        "insufficient credit",
+        "insufficient balance",
+        "credit balance",
+        "quota exceeded",
+    )
+    if any(marker in normalized for marker in credit_markers):
+        return ApiError(
+            402,
+            f"{provider_name}额度已用尽或达到月度消费上限。请充值或提高消费限额后重新提交任务。",
+            {"retryable": False, "fatal": True, "reason": "credits_exhausted", "provider_message": text[:1200]},
+        )
+
+    data = details.get("data")
+    task_failed = isinstance(data, dict) and str(data.get("status", "")).lower() in {
+        "failed", "cancelled", "canceled"
+    }
+    nested_code = details.get("code") or (data.get("code") if isinstance(data, dict) else None)
+    nested_code_text = str(nested_code) if nested_code is not None else ""
+    if task_failed or nested_code_text in {"400", "401", "403", "404"}:
+        if nested_code_text == "404":
+            message = text or "模型或接口不存在"
+            return ApiError(
+                502,
+                f"{provider_name}返回 404：{message[:1200]}。请检查模型 ID 是否正确（如 deepseek-ai/DeepSeek-V3-0324），以及 API 根地址是否以 /v1 结尾。",
+                {"retryable": False, "fatal": True, "provider_code": nested_code, "reason": "not_found"},
+            )
+        if nested_code_text == "401":
+            message = text or "认证失败"
+            return ApiError(
+                502,
+                f"{provider_name}认证失败（401）：{message[:1200]}。请检查 API Key 是否正确。",
+                {"retryable": False, "fatal": True, "provider_code": nested_code, "reason": "auth_failed"},
+            )
+        if nested_code_text == "403":
+            message = text or "无权访问"
+            return ApiError(
+                502,
+                f"{provider_name}拒绝访问（403）：{message[:1200]}。请检查 API Key 是否有该模型的访问权限。",
+                {"retryable": False, "fatal": True, "provider_code": nested_code, "reason": "forbidden"},
+            )
+        message = text or "供应商已拒绝或终止该生成任务。"
+        return ApiError(
+            502,
+            f"{provider_name}任务已失败：{message[:1200]}",
+            {"retryable": False, "fatal": True, "provider_code": nested_code},
+        )
+    return None
 
 
 def atlas_request(
@@ -60,6 +138,7 @@ def atlas_request(
     retry_post=False,
     provider_name="模型供应商",
     read_timeout=90,
+    max_attempts=None,
 ):
     api_key = (api_key or os.environ.get("ATLASCLOUD_API_KEY", "")).strip()
     if not api_key:
@@ -80,7 +159,10 @@ def atlas_request(
 
     method = method.upper()
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
-    attempts = 4 if method == "GET" else (3 if retry_post else 1)
+    if max_attempts is not None:
+        attempts = max(1, max_attempts)
+    else:
+        attempts = 4 if method == "GET" else (3 if retry_post else 1)
     response = None
     last_error = None
     for attempt in range(attempts):
@@ -92,6 +174,15 @@ def atlas_request(
                 json=payload,
                 timeout=(20, read_timeout),
             )
+            if not response.ok:
+                try:
+                    early_details = response.json()
+                except requests.JSONDecodeError:
+                    early_details = None
+                fatal_error = fatal_provider_error(response.status_code, early_details, provider_name)
+                if fatal_error:
+                    response.close()
+                    raise fatal_error
             if response.status_code not in RETRYABLE_STATUS_CODES or attempt == attempts - 1:
                 break
             response.close()
@@ -100,21 +191,44 @@ def atlas_request(
             last_error = exc
             if attempt == attempts - 1:
                 break
+        except ApiError:
+            raise
         except requests.RequestException as exc:
             raise ApiError(502, f"无法连接{provider_name}：{connection_error_message(exc)}") from exc
         time.sleep(1.0 * (2 ** attempt))
 
     if response is None:
+        error_info = classify_connection_error(last_error)
+        target_host = urlparse(url).hostname or ""
+        error_detail = str(last_error)[:500] if last_error else ""
         if method != "GET" and not retry_post:
             raise ApiError(
                 502,
                 f"提交生成任务时连接被{provider_name}重置。任务可能已经提交，为避免重复扣费未自动重试；请先查看供应商任务记录。",
-                {"retryable": True, "connection_reset": is_connection_reset(last_error)},
+                {"retryable": True, "connection_reset": is_connection_reset(last_error), "error_kind": error_info["kind"], "error_detail": error_detail, "target_host": target_host},
             ) from last_error
-        message = f"多次重试后仍无法连接{provider_name}。"
-        if is_connection_reset(last_error):
+        if error_info["kind"] == "timeout":
+            message = f"{provider_name}响应超时（{read_timeout}秒 × {attempts} 次重试均超时）。模型可能正在处理大量内容，可稍后重试或降低剧情树规模。"
+        elif error_info["kind"] == "connection_reset":
             message = f"{provider_name}连续重置了连接（Windows 10054），请检查接口地址、API Key、代理/VPN或更换供应商。"
-        raise ApiError(502, message, {"retryable": True}) from last_error
+        elif error_info["kind"] == "dns_failure":
+            message = f"无法解析{provider_name}域名（{target_host}），请检查网络连接或 DNS 设置。"
+        elif error_info["kind"] == "connection_refused":
+            message = f"{provider_name}拒绝连接（{target_host}），请检查 API 根地址是否正确。"
+        elif error_info["kind"] == "ssl_error":
+            message = f"连接{provider_name}时 SSL 证书验证失败，请检查系统时间或代理设置。"
+        elif error_info["kind"] == "proxy_error":
+            message = f"代理服务器导致无法连接{provider_name}，请检查代理/VPN 设置。"
+        else:
+            message = f"多次重试后仍无法连接{provider_name}（{error_info["summary"]}）。"
+        raise ApiError(502, message, {
+            "retryable": True,
+            "error_kind": error_info["kind"],
+            "error_detail": error_detail,
+            "target_host": target_host,
+            "attempts": attempts,
+            "read_timeout": read_timeout,
+        }) from last_error
 
     if not response.ok:
         try:
@@ -129,6 +243,9 @@ def atlas_request(
                 f"{provider_name}的 Cloudflare 拒绝了当前网络或客户端签名（错误 1010）。请联系供应商解除出口 IP 限制。",
                 {"cloudflare_error": 1010, "instance": details.get("instance")},
             )
+        fatal_error = fatal_provider_error(response.status_code, details, provider_name)
+        if fatal_error:
+            raise fatal_error
         upstream_path = urlparse(url).path
         raise ApiError(
             response.status_code,
@@ -153,6 +270,28 @@ def is_connection_reset(exc):
             return True
         current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
     return False
+
+
+def classify_connection_error(exc):
+    """Classify a connection/timeout error for user-facing diagnostics."""
+    if exc is None:
+        return {"kind": "unknown", "summary": "未知错误"}
+    if isinstance(exc, requests.Timeout):
+        return {"kind": "timeout", "summary": "请求超时（模型响应时间过长或网络不稳定）"}
+    if isinstance(exc, requests.ConnectionError):
+        if is_connection_reset(exc):
+            return {"kind": "connection_reset", "summary": "远程主机重置了连接（Windows 10054）"}
+        text = str(exc).lower()
+        if "name or service not known" in text or "nodename nor servname" in text or "getaddrinfo" in text:
+            return {"kind": "dns_failure", "summary": "DNS 解析失败（无法解析供应商域名）"}
+        if "connection refused" in text:
+            return {"kind": "connection_refused", "summary": "连接被拒绝（供应商服务未启动或端口错误）"}
+        if "ssl" in text or "certificate" in text:
+            return {"kind": "ssl_error", "summary": "SSL/TLS 证书验证失败"}
+        if "proxy" in text:
+            return {"kind": "proxy_error", "summary": "代理服务器错误"}
+        return {"kind": "connection_error", "summary": "网络连接失败"}
+    return {"kind": "request_error", "summary": str(exc)[:300]}
 
 
 def connection_error_message(exc):
@@ -184,7 +323,8 @@ def require_provider_base_url(data, key, default):
         value = default
     if not isinstance(value, str):
         raise ApiError(400, f"字段 {key} 不能为空。")
-    value = value.strip().rstrip("/")
+    # 去除常见的格式字符（反引号、引号、首尾空格）
+    value = value.strip().strip("`\"'").strip().rstrip("/")
     if len(value) > 1000:
         raise ApiError(400, f"字段 {key} 过长。")
     parsed = urlparse(value)
@@ -208,13 +348,19 @@ def provider_api_key(data, key, environment_name):
 def build_story_payload(data):
     depth = data.get("tree_depth", 3)
     branches = data.get("branch_count", 2)
+    shots_per_node = data.get("shots_per_node", 1)
     if not isinstance(depth, int) or not 2 <= depth <= 5:
         raise ApiError(400, "剧情树深度必须是 2 到 5。")
     if not isinstance(branches, int) or not 2 <= branches <= 4:
         raise ApiError(400, "每节点分支数必须是 2 到 4。")
+    if not isinstance(shots_per_node, int) or not 1 <= shots_per_node <= 5:
+        raise ApiError(400, "每剧情节点分镜数必须是 1 到 5。")
     node_count = sum(branches ** level for level in range(depth))
     if node_count > 160:
         raise ApiError(400, "剧情树节点数超过 160 个安全上限。")
+    total_shots = node_count * shots_per_node
+    if total_shots > 240:
+        raise ApiError(400, "互动影游分镜总数超过 240 个安全上限。")
 
     story = {
         "title": require_string(data, "title", 80),
@@ -224,20 +370,27 @@ def build_story_payload(data):
         "visual_style": str(data.get("visual_style", ""))[:3000],
         "tree_depth": depth,
         "branch_count": branches,
-        "expected_nodes": node_count,
+        "shots_per_node": shots_per_node,
+        "expected_story_nodes": node_count,
+        "expected_nodes": total_shots,
     }
     system_prompt = (
         "你是互动影游编剧兼分镜导演。请严格输出单个 JSON 对象，不要输出 Markdown、代码围栏或解释。"
         "剧情必须形成从起点到多个结局的有向树，每次玩家选择都应造成可感知的剧情差异。"
     )
     user_prompt = (
-        "根据下面的项目设定生成完整剧情树。每个非结局节点必须恰好拥有 branch_count 个 choices，"
-        "最后一层节点 choices 为空。总节点数应为 expected_nodes。\n"
+        "根据下面的项目设定生成完整剧情树。先设计 expected_story_nodes 个互动剧情节点，"
+        "再把每个互动剧情节点拆成 shots_per_node 个连续分镜，最终 scenes 总数必须为 expected_nodes。"
+        "同一互动剧情节点内部，前 shots_per_node-1 个分镜 choices 为空，并用 nextKey 指向本节点下一分镜；"
+        "每个非结局互动剧情节点的最后一个分镜必须恰好拥有 branch_count 个 choices，且 choice.targetKey 必须指向目标互动剧情节点的第 1 个分镜；"
+        "最后一层互动剧情节点的最后分镜 choices 为空。\n"
         f"项目设定：{json.dumps(story, ensure_ascii=False)}\n"
-        "返回结构：{\"startKey\":\"n0\",\"scenes\":[{\"key\":\"n0\",\"title\":\"...\","
+        "返回结构：{\"startKey\":\"n0_s1\",\"scenes\":[{\"key\":\"n0_s1\",\"storyNodeKey\":\"n0\",\"shotInNode\":1,\"shotsInNode\":shots_per_node,\"title\":\"...\","
         "\"shot\":\"大全景|全景|中景|近景|特写\",\"duration\":8,\"action\":\"...\","
         "\"dialogue\":\"...\",\"choices\":[{\"text\":\"...\",\"effect\":\"...\","
-        "\"targetKey\":\"n1\"}]}]}。key 必须唯一，targetKey 必须指向 scenes 中存在的 key。"
+        "\"targetKey\":\"n1_s1\"}],\"nextKey\":\"n0_s2\"}]}。key 必须唯一，nextKey 和 targetKey 必须指向 scenes 中存在的 key。"
+        "每个分镜 action 只写一个不可再分的动作或表演节拍，避免把整个互动节点剧情塞进单镜；"
+        "dialogue 只保留当前分镜实际说出的对白，单镜最长按 15 秒设计。"
     )
     return {
         "model": require_model(data, "model", "deepseek-v3"),
@@ -307,6 +460,8 @@ def build_video_payload(data):
         raise ApiError(400, "视频时长必须是 1 到 15 秒的整数。")
 
     image_url = require_string(data, "image_url", 200000)
+    if image_url.startswith("/projects/"):
+        image_url = resolve_reference_image(image_url)
     if not (image_url.startswith("https://") or image_url.startswith("data:image/")):
         raise ApiError(400, "起始图片必须是 HTTPS URL 或图片 data URI。")
 
@@ -474,16 +629,19 @@ class DirectorHandler(SimpleHTTPRequestHandler):
     server_version = "DirectorWorkbench/0.1"
 
     def log_message(self, format, *args):
-        print(f"[{self.log_date_time_string()}] {format % args}")
+        print(f"[{self.log_date_time_string()}] {format % args}", flush=True)
 
     def send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
     def read_json(self):
         try:
@@ -504,7 +662,10 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         payload = {"error": exc.message}
         if exc.details is not None:
             payload["details"] = exc.details
-        self.send_json(exc.status, payload)
+        try:
+            self.send_json(exc.status, payload)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
     def do_GET(self):
         parsed_request = urlparse(self.path)
@@ -522,6 +683,14 @@ class DirectorHandler(SimpleHTTPRequestHandler):
                 getattr(self, route.handler)(parsed_request, suffix)
             except ApiError as exc:
                 self.handle_api_error(exc)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+            except Exception as exc:
+                print(f"[ERROR] GET {path} 未处理异常：{type(exc).__name__}: {exc}", flush=True)
+                try:
+                    self.send_json(500, {"error": f"服务器内部错误：{type(exc).__name__}"})
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
             return
 
         if path.startswith("/api/"):
@@ -532,6 +701,7 @@ class DirectorHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        print(f"[POST] {path}", flush=True)
         try:
             route, suffix = API_ROUTES.resolve("POST", path)
             if not route:
@@ -541,6 +711,14 @@ class DirectorHandler(SimpleHTTPRequestHandler):
             getattr(self, route.handler)(data)
         except ApiError as exc:
             self.handle_api_error(exc)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        except Exception as exc:
+            print(f"[ERROR] POST {path} 未处理异常：{type(exc).__name__}: {exc}", flush=True)
+            try:
+                self.send_json(500, {"error": f"服务器内部错误：{type(exc).__name__}"})
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
 
     def api_health(self, parsed_request, suffix):
         self.send_json(200, {
@@ -585,7 +763,8 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         api_key = provider_api_key(data, "text_api_key", "TEXT_MODEL_API_KEY")
         self.send_json(200, atlas_request(
             "chat/completions", "POST", payload, base_url, api_key,
-            retry_post=True, provider_name="文本模型供应商", read_timeout=240,
+            retry_post=True, provider_name="文本模型供应商", read_timeout=900,
+            max_attempts=2,
         ))
 
     def generate_episode(self, data):
@@ -606,7 +785,8 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         }
         self.send_json(200, atlas_request(
             "chat/completions", "POST", payload, base_url, api_key,
-            retry_post=True, provider_name="文本模型供应商", read_timeout=240,
+            retry_post=True, provider_name="文本模型供应商", read_timeout=900,
+            max_attempts=2,
         ))
 
     def test_text_provider(self, data):
@@ -707,6 +887,31 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         relative = target.relative_to(ROOT).as_posix()
         self.send_json(200, {"ok": True, "localUrl": f"/{relative}", "path": str(target)})
 
+    def resolve_asset_path(self, data):
+        value = require_string(data, "path", 10000)
+        kind = data.get("kind")
+        if kind not in {"image", "video"}:
+            raise ApiError(400, "素材类型必须是 image 或 video。")
+        if value.startswith("/projects/"):
+            relative = unquote(urlparse(value).path).removeprefix("/projects/")
+            target = (PROJECTS_DIR / relative).resolve()
+        else:
+            target = Path(value).expanduser().resolve()
+        try:
+            target.relative_to(PROJECTS_DIR.resolve())
+        except ValueError as exc:
+            raise ApiError(400, "手动素材路径必须位于 projects 文件夹内。") from exc
+        allowed = {
+            "image": {".jpg", ".jpeg", ".png", ".webp"},
+            "video": {".mp4", ".webm", ".mov"},
+        }
+        if not target.is_file():
+            raise ApiError(404, "素材文件不存在，请检查路径。")
+        if target.suffix.lower() not in allowed[kind]:
+            raise ApiError(400, f"该文件不是支持的{('图片' if kind == 'image' else '视频')}格式。")
+        relative = target.relative_to(ROOT).as_posix()
+        self.send_json(200, {"ok": True, "localUrl": f"/{relative}", "path": str(target)})
+
     def save_project(self, data):
         project = data.get("project")
         has_legacy_scenes = isinstance(project, dict) and isinstance(project.get("scenes"), list)
@@ -719,9 +924,16 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         project_dir.mkdir(parents=True, exist_ok=True)
         target = project_dir / "project.json"
         temporary = project_dir / "project.json.part"
+        backup = None
+        if target.is_file():
+            backup_dir = project_dir / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            backup = backup_dir / f"project-{stamp}.json"
+            shutil.copy2(target, backup)
         temporary.write_text(json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(target)
-        self.send_json(200, {"ok": True, "path": str(target)})
+        self.send_json(200, {"ok": True, "path": str(target), "backupPath": str(backup) if backup else ""})
 
     def export_player(self, data):
         project = data.get("project")
@@ -862,12 +1074,15 @@ class DirectorHandler(SimpleHTTPRequestHandler):
             return
         content = target.read_bytes()
         mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        self.send_response(200)
-        self.send_header("Content-Type", f"{mime_type}; charset=utf-8" if mime_type.startswith("text/") or mime_type == "application/javascript" else mime_type)
-        self.send_header("Content-Length", str(len(content)))
-        self.send_header("Cache-Control", cache_control)
-        self.end_headers()
-        self.wfile.write(content)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", f"{mime_type}; charset=utf-8" if mime_type.startswith("text/") or mime_type == "application/javascript" else mime_type)
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", cache_control)
+            self.end_headers()
+            self.wfile.write(content)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
     def serve_static(self, path):
         relative = "index.html" if path == "/" else path.lstrip("/")
@@ -884,12 +1099,13 @@ def main():
     host = os.environ.get("DIRECTOR_HOST", "127.0.0.1")
     port = int(os.environ.get("DIRECTOR_PORT", "8000"))
     server = ThreadingHTTPServer((host, port), DirectorHandler)
-    print(f"Narrative Forge（叙事锻造工坊）：http://{host}:{port}")
-    print("默认模型密钥：" + ("已配置" if os.environ.get("ATLASCLOUD_API_KEY") else "未配置"))
+    print(f"Narrative Forge（叙事锻造工坊）：http://{host}:{port}", flush=True)
+    print("默认模型密钥：" + ("已配置" if os.environ.get("ATLASCLOUD_API_KEY") else "未配置"), flush=True)
+    print(f"版本：{APP_VERSION}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n工作台已停止。")
+        print("\n工作台已停止。", flush=True)
     finally:
         server.server_close()
 

@@ -3,16 +3,32 @@
   const project = window.FRAMEFORGE_PROJECT;
   const $ = (selector) => document.querySelector(selector);
   const byId = new Map((project?.scenes || []).map((scene) => [scene.id, scene]));
-  const state = { sceneId: project?.startSceneId || project?.scenes?.[0]?.id || "", history: [] };
+  const state = { sceneId: project?.startSceneId || project?.scenes?.[0]?.id || "", history: [], autoTimer: null };
 
   function mediaPath(value) { return value ? encodeURI(value) : ""; }
+  function clearAutoTimer() {
+    if (state.autoTimer) { clearTimeout(state.autoTimer); state.autoTimer = null; }
+  }
+  function shouldAutoContinue(scene) {
+    return Boolean(scene?.nextSceneId && !scene.choices?.length && scene.shotsInNode > 1);
+  }
+  function goToScene(targetSceneId, choiceText = "") {
+    clearAutoTimer();
+    if (!byId.has(targetSceneId)) return;
+    state.history.push({ sceneId: state.sceneId, choice: choiceText });
+    state.sceneId = targetSceneId;
+    render();
+  }
 
   function render() {
     const scene = byId.get(state.sceneId);
     if (!scene) return;
+    clearAutoTimer();
     $("#progress").textContent = project.meta?.mode === "serial"
       ? `第${scene.episode || 1}集 · 第${scene.episodeOrder || state.history.length + 1}镜`
-      : `经历 ${state.history.length + 1} 个剧情节点`;
+      : scene.shotsInNode > 1
+        ? `分镜 ${scene.shotInNode}/${scene.shotsInNode} · 已选择 ${state.history.filter((item) => item.choice).length} 次`
+        : `经历 ${state.history.length + 1} 个剧情节点`;
     $("#sceneTitle").textContent = scene.title;
     $("#action").textContent = scene.action || "";
     $("#dialogue").textContent = scene.dialogue || "";
@@ -23,12 +39,15 @@
     if (scene.video) {
       const video = document.createElement("video");
       video.src = mediaPath(scene.video); video.controls = true; video.autoplay = true; video.playsInline = true;
+      if (shouldAutoContinue(scene)) video.addEventListener("ended", () => goToScene(scene.nextSceneId), { once: true });
       frame.appendChild(video);
     } else if (scene.image) {
       const image = document.createElement("img"); image.src = mediaPath(scene.image); image.alt = scene.title;
       frame.appendChild(image);
+      if (shouldAutoContinue(scene)) state.autoTimer = setTimeout(() => goToScene(scene.nextSceneId), (scene.duration || 8) * 1000);
     } else {
       frame.innerHTML = `<div class="empty"><strong>${scene.title}</strong><span>该节点没有打包影音素材</span></div>`;
+      if (shouldAutoContinue(scene)) state.autoTimer = setTimeout(() => goToScene(scene.nextSceneId), 3000);
     }
     stage.appendChild(frame);
 
@@ -38,10 +57,7 @@
       const button = document.createElement("button"); button.className = "choice";
       const strong = document.createElement("strong"); strong.textContent = choice.text || "继续"; button.appendChild(strong);
       if (choice.effect) { const small = document.createElement("small"); small.textContent = choice.effect; button.appendChild(small); }
-      button.addEventListener("click", () => {
-        if (!byId.has(choice.targetSceneId)) return;
-        state.history.push({ sceneId: scene.id, choice: choice.text }); state.sceneId = choice.targetSceneId; render();
-      });
+      button.addEventListener("click", () => goToScene(choice.targetSceneId, choice.text));
       choices.appendChild(button);
     });
     if (!targets.length) {
@@ -49,7 +65,7 @@
     }
   }
 
-  function restart() { state.sceneId = project.startSceneId || project.scenes?.[0]?.id || ""; state.history = []; render(); }
+  function restart() { clearAutoTimer(); state.sceneId = project.startSceneId || project.scenes?.[0]?.id || ""; state.history = []; render(); }
   function start() { $("#landing").hidden = true; $("#game").hidden = false; restart(); }
   async function fullscreen() {
     if (document.fullscreenElement) await document.exitFullscreen(); else await $("#app").requestFullscreen();

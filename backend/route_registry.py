@@ -47,6 +47,7 @@ API_ROUTES = (
     .register("POST", "/api/generate-image", "generate_image")
     .register("POST", "/api/generate-video", "generate_video")
     .register("POST", "/api/save-asset", "save_asset")
+    .register("POST", "/api/resolve-asset-path", "resolve_asset_path")
     .register("POST", "/api/save-project", "save_project")
     .register("POST", "/api/export-player", "export_player")
     .register("POST", "/api/export-serial", "export_serial")

@@ -1,4 +1,5 @@
 const STORAGE_KEY = "frameforge-project-v1";
+const RECOVERY_KEY = "frameforge-project-recovery-v1";
 const SECRET_STORAGE_KEY = "frameforge-provider-secrets-v1";
 const DEFAULT_MODELS = {
   textBaseUrl: "https://api.atlascloud.ai/v1",
@@ -19,6 +20,7 @@ const elements = {
   projectGenre: $("#projectGenre"), projectAspect: $("#projectAspect"),
   projectStyle: $("#projectStyle"), projectCharacter: $("#projectCharacter"),
   projectTreeDepth: $("#projectTreeDepth"), projectBranchCount: $("#projectBranchCount"),
+  projectInteractiveShotsPerNode: $("#projectInteractiveShotsPerNode"),
   projectTextModel: $("#projectTextModel"), projectImageModel: $("#projectImageModel"),
   projectVideoModel: $("#projectVideoModel"), projectImageEditModel: $("#projectImageEditModel"),
   projectTextBaseUrl: $("#projectTextBaseUrl"), projectImageBaseUrl: $("#projectImageBaseUrl"),
@@ -51,7 +53,7 @@ let project = normalizeProject(loadProject() || {
   selectedEpisodeId: null,
 });
 let toastTimer;
-let playerState = { sceneId: null, history: [], startSceneId: null };
+let playerState = { sceneId: null, history: [], startSceneId: null, autoTimer: null };
 let serialState = { index: 0, autoPlay: false, autoTimer: null };
 const activeTasks = new Map();
 let treeZoom = 1;
@@ -134,6 +136,7 @@ function normalizeProject(value) {
   normalized.meta = normalized.meta || readMetaFromForm();
   normalized.meta.treeDepth = Number(normalized.meta.treeDepth) || 3;
   normalized.meta.branchCount = Number(normalized.meta.branchCount) || 2;
+  normalized.meta.interactiveShotsPerNode = Math.max(1, Math.min(5, Number(normalized.meta.interactiveShotsPerNode) || 1));
   normalized.meta.episodeCount = Number(normalized.meta.episodeCount) || 5;
   normalized.meta.shotsPerEpisode = Number(normalized.meta.shotsPerEpisode) || 5;
   normalized.meta.serialTone = normalized.meta.serialTone || "drama";
@@ -168,6 +171,8 @@ function normalizeSceneCollection(container, serial) {
     }
     scene.imagePredictionId = scene.imagePredictionId || "";
     scene.videoPredictionId = scene.videoPredictionId || "";
+    scene.imagePath = scene.imagePath || "";
+    scene.videoPath = scene.videoPath || "";
     scene.transition = ["match", "dissolve", "cut", "fade"].includes(scene.transition) ? scene.transition : (index ? "match" : "cut");
     scene.entryState = scene.entryState || "";
     scene.exitState = scene.exitState || "";
@@ -191,6 +196,7 @@ function readMetaFromForm() {
     character: $("#projectCharacter")?.value || "",
     treeDepth: Number($("#projectTreeDepth")?.value || 3),
     branchCount: Number($("#projectBranchCount")?.value || 2),
+    interactiveShotsPerNode: Math.max(1, Math.min(5, Number($("#projectInteractiveShotsPerNode")?.value || 1))),
     episodeCount: Number($("#projectEpisodeCount")?.value || 5),
     shotsPerEpisode: Number($("#projectShotsPerEpisode")?.value || 12),
     serialTone: $("#projectSerialTone")?.value || "drama",
@@ -214,6 +220,7 @@ function applyMetaToForm() {
   elements.projectCharacter.value = project.meta.character;
   elements.projectTreeDepth.value = String(project.meta.treeDepth || 3);
   elements.projectBranchCount.value = String(project.meta.branchCount || 2);
+  if (elements.projectInteractiveShotsPerNode) elements.projectInteractiveShotsPerNode.value = String(project.meta.interactiveShotsPerNode || 1);
   $("#projectEpisodeCount").value = String(project.meta.episodeCount || 5);
   $("#projectShotsPerEpisode").value = String(project.meta.shotsPerEpisode || 5);
   $("#projectSerialTone").value = project.meta.serialTone || "drama";
@@ -260,6 +267,25 @@ function saveProject() {
 function loadProject() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY)); }
   catch { return null; }
+}
+function snapshotProjectBeforeReplacement(reason) {
+  localStorage.setItem(RECOVERY_KEY, JSON.stringify({ project, reason, createdAt: new Date().toISOString() }));
+  updateRecoveryButton();
+}
+function updateRecoveryButton() {
+  const button = $("#restoreProjectBtn");
+  if (button) button.hidden = !localStorage.getItem(RECOVERY_KEY);
+}
+function restoreProjectSnapshot() {
+  try {
+    const recovery = JSON.parse(localStorage.getItem(RECOVERY_KEY));
+    if (!recovery?.project) throw new Error("没有可恢复的项目快照。");
+    const current = project;
+    project = normalizeProject(recovery.project);
+    localStorage.setItem(RECOVERY_KEY, JSON.stringify({ project: current, reason: "恢复前状态", createdAt: new Date().toISOString() }));
+    applyMetaToForm(); saveProject(); render(); updateRecoveryButton();
+    showToast(`已恢复覆盖前项目${recovery.reason ? `（${recovery.reason}）` : ""}。`);
+  } catch (error) { showToast(error.message, true); }
 }
 function activeEpisode() {
   return window.FrameForgeEpisodeModel.active(project);
@@ -576,12 +602,14 @@ function draftRequestMeta() {
   const episode = currentMode === "serial" ? ensureAtLeastOneEpisode() : null;
   if (!meta.synopsis.trim() && !episode?.meta.synopsis.trim()) { showToast("请先填写项目故事梗概或本集剧情梗概。", true); return null; }
   if (currentMode === "interactive") {
-    const nodeCount = estimatedTreeNodes(meta.treeDepth, meta.branchCount);
-    if (nodeCount > 160) {
-      showToast(`该组合会生成 ${nodeCount} 个节点，超过 160 个安全上限。请降低深度或分支数。`, true);
+    const storyNodeCount = estimatedTreeNodes(meta.treeDepth, meta.branchCount);
+    const shotsPerNode = meta.interactiveShotsPerNode || 1;
+    const nodeCount = storyNodeCount * shotsPerNode;
+    if (storyNodeCount > 160 || nodeCount > 240) {
+      showToast(`该组合会生成 ${storyNodeCount} 个剧情节点 / ${nodeCount} 个分镜，超过安全上限。请降低深度、分支数或每节点分镜数。`, true);
       return null;
     }
-    return { meta, nodeCount };
+    return { meta, nodeCount, storyNodeCount, shotsPerNode };
   }
   // 短剧模式
   syncEpisodeFromForm();
@@ -596,21 +624,80 @@ function draftRequestMeta() {
 function confirmDraftReplacement() {
   if (!project.scenes.length) return true;
   const scope = currentMode === "serial" ? `当前集“${activeEpisode()?.meta.title || "未命名"}”的全部镜头` : "当前全部剧情节点";
-  return confirm(`生成草案会替换${scope}，但不会删除已保存到磁盘的素材。继续吗？`);
+  const accepted = confirm(`生成草案会替换${scope}，但不会删除已保存到磁盘的素材。继续吗？`);
+  if (accepted) snapshotProjectBeforeReplacement(`生成草案前：${scope}`);
+  return accepted;
 }
 
 function estimatedTreeNodes(depth, branches) {
   return Array.from({ length: depth }, (_, level) => branches ** level).reduce((sum, value) => sum + value, 0);
 }
+function splitNarrativeBeats(action, count, fallback) {
+  const sentences = narrativeSentences(action);
+  if (!sentences.length) sentences.push(fallback || action || "角色完成当前剧情段的关键行动。");
+  return Array.from({ length: count }, (_, index) => {
+    const text = sentences[index] || sentences[Math.min(index, sentences.length - 1)] || fallback || "";
+    const prefixes = count <= 1 ? [""] : ["建立当前情境：", "推进核心动作：", "承接变化反应：", "揭示即时结果：", "收束到选择前状态："];
+    return `${prefixes[Math.min(index, prefixes.length - 1)]}${text}`.slice(0, 6000);
+  });
+}
+function expandInteractiveStoryScenes(baseScenes, idByKey, shotsPerNode) {
+  if (shotsPerNode <= 1) return { scenes: baseScenes, startIdByKey: idByKey };
+  const expanded = [];
+  const startIdByKey = new Map();
+  const startIdByBaseId = new Map();
+  const tailByKey = new Map();
+  const keyByBaseId = new Map([...idByKey.entries()].map(([key, id]) => [id, key]));
+  baseScenes.forEach((baseScene, index) => {
+    const key = keyByBaseId.get(baseScene.id) || `n${index}`;
+    const beats = splitNarrativeBeats(baseScene.action, shotsPerNode, baseScene.title);
+    let previous = null;
+    for (let shotIndex = 0; shotIndex < shotsPerNode; shotIndex += 1) {
+      const scene = createScene({
+        ...baseScene,
+        id: shotIndex === 0 ? baseScene.id : uid(),
+        order: expanded.length,
+        title: shotsPerNode > 1 ? `${baseScene.title} · 分镜 ${shotIndex + 1}/${shotsPerNode}` : baseScene.title,
+        action: beats[shotIndex],
+        dialogue: shotIndex === shotsPerNode - 1 ? baseScene.dialogue : "",
+        choices: [],
+        nextSceneId: "",
+        storyNodeKey: key,
+        shotInNode: shotIndex + 1,
+        shotsInNode: shotsPerNode,
+      });
+      if (previous) previous.nextSceneId = scene.id;
+      else {
+        startIdByKey.set(key, scene.id);
+        startIdByBaseId.set(baseScene.id, scene.id);
+      }
+      expanded.push(scene);
+      previous = scene;
+    }
+    tailByKey.set(key, previous);
+  });
+  baseScenes.forEach((baseScene, index) => {
+    const key = keyByBaseId.get(baseScene.id) || `n${index}`;
+    const tail = tailByKey.get(key);
+    if (!tail) return;
+    tail.choices = baseScene.choices.map((choice) => ({ ...choice, targetSceneId: startIdByBaseId.get(choice.targetSceneId) || choice.targetSceneId }));
+    tail.nextSceneId = startIdByBaseId.get(baseScene.nextSceneId) || baseScene.nextSceneId || "";
+  });
+  return { scenes: expanded, startIdByKey };
+}
 function updateTreeEstimate() {
   const depth = Number(elements.projectTreeDepth.value || 3);
   const branches = Number(elements.projectBranchCount.value || 2);
-  const nodes = estimatedTreeNodes(depth, branches);
+  const shotsPerNode = Math.max(1, Math.min(5, Number(elements.projectInteractiveShotsPerNode?.value || 1)));
+  const storyNodes = estimatedTreeNodes(depth, branches);
+  const nodes = storyNodes * shotsPerNode;
   const endings = branches ** (depth - 1);
   const estimate = $("#treeEstimate");
-  estimate.textContent = `预计 ${nodes} 个节点 · ${endings} 个结局`;
-  estimate.className = `tree-estimate${nodes > 160 ? " warning" : ""}`;
-  $("#draftBtn").disabled = nodes > 160;
+  estimate.textContent = shotsPerNode > 1
+    ? `预计 ${storyNodes} 个剧情节点 · ${nodes} 个分镜 · ${endings} 个结局`
+    : `预计 ${storyNodes} 个节点 · ${endings} 个结局`;
+  estimate.className = `tree-estimate${storyNodes > 160 || nodes > 240 ? " warning" : ""}`;
+  $("#draftBtn").disabled = storyNodes > 160 || nodes > 240;
 }
 function updateSerialEstimate() {
   const episodes = Number($("#projectEpisodeCount")?.value || 5);
@@ -630,10 +717,11 @@ function buildLocalDraft() {
   if (currentMode === "serial") { buildLocalSerialDraft(); return; }
   const request = draftRequestMeta();
   if (!request || !confirmDraftReplacement()) return;
-  const { meta, nodeCount } = request;
+  const { meta, nodeCount, storyNodeCount, shotsPerNode } = request;
   project.meta = meta;
-  project.scenes = [];
+  const baseScenes = [];
   const levels = [];
+  const idByKey = new Map();
   const stageNames = ["序幕", "探索", "线索", "抉择", "终局"];
   const actions = ["谨慎调查异常源", "追踪隐藏线索", "面对意外阻碍", "验证关键证据"];
   for (let level = 0; level < meta.treeDepth; level += 1) {
@@ -652,7 +740,9 @@ function buildLocalDraft() {
       const scene = createScene({ title, shot: isRoot ? "大全景" : isEnding ? "全景" : level % 2 ? "中景" : "近景", action, dialogue: isRoot ? "我的选择会改变接下来的一切。" : isEnding ? "这就是我选择的未来。" : "每条路，都在揭示不同的真相。" });
       scene.imagePrompt = composeImagePrompt(scene);
       scene.videoPrompt = composeVideoPrompt(scene);
-      project.scenes.push(scene); levelScenes.push(scene);
+      const key = `n_${level}_${position}`;
+      scene.storyNodeKey = key;
+      baseScenes.push(scene); levelScenes.push(scene); idByKey.set(key, scene.id);
     }
     levels.push(levelScenes);
   }
@@ -664,13 +754,15 @@ function buildLocalDraft() {
       });
     });
   }
-  const intro = levels[0][0];
+  const expanded = expandInteractiveStoryScenes(baseScenes, idByKey, shotsPerNode);
+  project.scenes = expanded.scenes;
+  const intro = project.scenes.find((scene) => scene.id === expanded.startIdByKey.get("n_0_0")) || project.scenes[0];
   project.startSceneId = intro.id;
   project.scenes.forEach((scene) => { scene.referenceSceneId = scene.id === intro.id ? "" : intro.id; });
   normalizeSceneOrder();
   project.selectedSceneId = intro.id;
   saveProject(); render();
-  showToast(`本地模板已生成 ${nodeCount} 个剧情节点。`);
+  showToast(shotsPerNode > 1 ? `本地模板已生成 ${storyNodeCount} 个剧情节点 / ${nodeCount} 个分镜。` : `本地模板已生成 ${nodeCount} 个剧情节点。`);
 }
 
 // ─────────────────────────────────────────────
@@ -735,15 +827,71 @@ function buildLocalSerialDraft() {
   showToast(`“${episode.meta.title}”已生成 ${project.scenes.length} 个镜头。`);
 }
 
+// 文本生成错误格式化：根据错误类型给出针对性建议
+function formatTextGenError(error) {
+  const kind = error.errorKind || "";
+  const reason = error.reason || "";
+  const base = error.message || "生成失败";
+  const hint = " 可改用\"本地模板生成\"。";
+  if (reason === "not_found") return `${base}\n建议：检查模型 ID 是否正确。AtlasCloud 可用模型：deepseek-ai/DeepSeek-V3-0324、deepseek-ai/DeepSeek-V3.1 等。${hint}`;
+  if (reason === "auth_failed") return `${base}\n建议：检查 API Key 是否正确。${hint}`;
+  if (reason === "forbidden") return `${base}\n建议：检查 API Key 是否有该模型的访问权限。${hint}`;
+  if (reason === "credits_exhausted") return `${base}\n建议：充值或更换供应商。${hint}`;
+  if (kind === "timeout") return `${base}\n建议：降低剧情树深度/分支数，或更换响应更快的模型。${hint}`;
+  if (kind === "dns_failure") return `${base}\n建议：检查网络连接、DNS 或代理设置。${hint}`;
+  if (kind === "connection_refused") return `${base}\n建议：检查 API 根地址是否正确。${hint}`;
+  if (kind === "ssl_error") return `${base}\n建议：检查系统时间是否正确、代理是否拦截了 HTTPS。${hint}`;
+  if (kind === "proxy_error") return `${base}\n建议：关闭或更换代理/VPN 后重试。${hint}`;
+  if (kind === "connection_reset") return `${base}\n建议：检查 API Key、代理/VPN 或更换供应商。${hint}`;
+  return `${base}${hint}`;
+}
+
+// 文本生成进度管理：超时、计时、取消
+let textGenController = null;
+let textGenTimer = null;
+const TEXT_GEN_TIMEOUT_MS = 900_000; // 15 分钟上限（推理模型生成大规模剧情树可能需要 10+ 分钟）
+
+function startTextGenProgress(button, originalText) {
+  textGenController = new AbortController();
+  const startTime = Date.now();
+  button.disabled = false;
+  button.classList.add("generating");
+  button.textContent = `生成中… 0s（再次点击取消）`;
+  textGenTimer = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    if (elapsed * 1000 >= TEXT_GEN_TIMEOUT_MS) {
+      cancelTextGen(button, originalText);
+      showToast("文本模型生成超时（15 分钟），已自动取消。可降低剧情树规模或更换模型。", true);
+      return;
+    }
+    const mins = Math.floor(elapsed / 60);
+    const secs = elapsed % 60;
+    const timeStr = mins > 0 ? `${mins}m${secs}s` : `${secs}s`;
+    button.textContent = `生成中… ${timeStr}（再次点击取消）`;
+  }, 1000);
+  return textGenController.signal;
+}
+
+function cancelTextGen(button, originalText) {
+  if (textGenController) { textGenController.abort(); textGenController = null; }
+  if (textGenTimer) { clearInterval(textGenTimer); textGenTimer = null; }
+  if (button) { button.classList.remove("generating"); button.textContent = originalText; }
+}
+
+function isTextGenRunning() { return textGenController !== null; }
+
 // 短剧 AI 生成
 async function generateSerialDraft() {
+  const button = $("#draftBtn");
+  const originalText = "使用文本模型生成当前集";
+  if (isTextGenRunning()) { cancelTextGen(button, originalText); return; }
+  await Promise.resolve();
   const request = draftRequestMeta();
   if (!request || !confirmDraftReplacement()) return;
   const { meta, episode } = request;
   saveProviderSecrets();
   const provider = providerSettings("text");
-  const button = $("#draftBtn");
-  button.disabled = true; button.textContent = "文本模型生成中…";
+  const signal = startTextGenProgress(button, originalText);
   const toneLabels = { drama: "情感正剧", thriller: "悬疑惊悚", comedy: "轻喜剧", action: "动作冒险", romance: "爱情甜宠" };
   const episodeNumber = episode.order + 1;
   const previousEpisode = project.episodes[episode.order - 1];
@@ -801,12 +949,14 @@ async function generateSerialDraft() {
       text_base_url: provider.baseUrl,
       text_api_key: provider.apiKey,
       prompt: serialPrompt,
-    }) });
+    }), signal });
     installGeneratedSerial(parseStoryJson(result), meta, episode);
   } catch (error) {
-    showToast(`${error.message} 可改用"本地模板生成"。`, true);
+    if (error.name === "AbortError") showToast("已取消文本模型生成。");
+    else showToast(formatTextGenError(error), true);
   } finally {
-    button.disabled = false; button.textContent = "使用文本模型生成当前集";
+    cancelTextGen(button, originalText);
+    button.disabled = false;
   }
 }
 
@@ -867,14 +1017,19 @@ function installGeneratedSerial(generated, meta, episode) {
 }
 
 async function generateStoryDraft() {
+  const button = $("#draftBtn");
+  const originalText = "使用文本模型生成";
+  if (isTextGenRunning()) { cancelTextGen(button, originalText); return; }
   if (currentMode === "serial") { await generateSerialDraft(); return; }
+  await Promise.resolve();
   const request = draftRequestMeta();
   if (!request || !confirmDraftReplacement()) return;
   const { meta, nodeCount } = request;
+  const totalShots = nodeCount * (meta.interactiveShotsPerNode || 1);
+  if (totalShots > 30 && !confirm(`本次将生成 ${totalShots} 个分镜（${nodeCount} 个剧情节点 × ${meta.interactiveShotsPerNode || 1} 镜/节点）。\n大规模生成可能需要 5-15 分钟，推理模型（如 MiniMax-M2.7）耗时更长。\n\n确定继续吗？`)) return;
   saveProviderSecrets();
   const provider = providerSettings("text");
-  const button = $("#draftBtn");
-  button.disabled = true; button.textContent = "文本模型生成中…";
+  const signal = startTextGenProgress(button, originalText);
   try {
     const result = await requestJson("/api/generate-story", { method: "POST", body: JSON.stringify({
       model: meta.textModel,
@@ -887,13 +1042,15 @@ async function generateStoryDraft() {
       visual_style: meta.visualStyle,
       tree_depth: meta.treeDepth,
       branch_count: meta.branchCount,
-    }) });
+      shots_per_node: meta.interactiveShotsPerNode || 1,
+    }), signal });
     installGeneratedStory(parseStoryJson(result), meta, nodeCount);
   } catch (error) {
-    showToast(`${error.message} 可改用"本地模板生成"。`, true);
+    if (error.name === "AbortError") showToast("已取消文本模型生成。");
+    else showToast(formatTextGenError(error), true);
   } finally {
-    button.disabled = nodeCount > 160;
-    button.textContent = "使用文本模型生成";
+    cancelTextGen(button, originalText);
+    button.disabled = nodeCount > 240;
   }
 }
 
@@ -910,6 +1067,7 @@ function extractAssistantContent(result) {
 function parseStoryJson(result) {
   const raw = extractAssistantContent(result)
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*$/gi, "")
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
@@ -954,7 +1112,7 @@ async function testTextProvider() {
 
 function installGeneratedStory(generated, meta, expectedNodes) {
   if (!generated || !Array.isArray(generated.scenes) || !generated.scenes.length) throw new Error("文本模型没有返回 scenes 数组。");
-  if (generated.scenes.length > 160) throw new Error("文本模型返回超过 160 个节点，已拒绝导入。");
+  if (generated.scenes.length > 240) throw new Error("文本模型返回超过 240 个分镜，已拒绝导入。");
   const keys = new Set();
   generated.scenes.forEach((item, index) => {
     const key = String(item?.key || `n${index}`);
@@ -974,6 +1132,9 @@ function installGeneratedStory(generated, meta, expectedNodes) {
     duration: [4, 6, 8, 10, 12, 15].includes(Number(item.duration)) ? Number(item.duration) : 8,
     action: String(item.action || "").slice(0, 6000),
     dialogue: String(item.dialogue || "").slice(0, 3000),
+    storyNodeKey: String(item.storyNodeKey || ""),
+    shotInNode: Number(item.shotInNode) || 1,
+    shotsInNode: Number(item.shotsInNode) || 1,
   }));
   const idByKey = new Map(generated.scenes.map((item, index) => [String(item?.key || `n${index}`), scenes[index].id]));
   generated.scenes.forEach((item, index) => {
@@ -984,18 +1145,28 @@ function installGeneratedStory(generated, meta, expectedNodes) {
       targetSceneId: idByKey.get(String(choice?.targetKey || "")) || "",
     }));
     scene.nextSceneId = idByKey.get(String(item?.nextKey || "")) || "";
+  });
+  let finalScenes = scenes;
+  let finalStartId = idByKey.get(String(generated.startKey || generated.scenes[0]?.key || "")) || scenes[0].id;
+  const shotsPerNode = meta.interactiveShotsPerNode || 1;
+  const storyNodeCount = expectedNodes / shotsPerNode;
+  if (shotsPerNode > 1 && scenes.length === storyNodeCount) {
+    const expanded = expandInteractiveStoryScenes(scenes, idByKey, shotsPerNode);
+    finalScenes = expanded.scenes;
+    finalStartId = expanded.startIdByKey.get(String(generated.startKey || generated.scenes[0]?.key || "")) || finalScenes[0].id;
+  }
+  finalScenes.forEach((scene) => {
     scene.imagePrompt = composeImagePrompt(scene);
     scene.videoPrompt = composeVideoPrompt(scene);
+    scene.referenceSceneId = scene.id === finalStartId ? "" : finalStartId;
   });
-  const startId = idByKey.get(String(generated.startKey || generated.scenes[0]?.key || "")) || scenes[0].id;
-  scenes.forEach((scene) => { scene.referenceSceneId = scene.id === startId ? "" : startId; });
   project.meta = meta;
-  project.scenes = scenes;
-  project.startSceneId = startId;
-  project.selectedSceneId = startId;
+  project.scenes = finalScenes;
+  project.startSceneId = finalStartId;
+  project.selectedSceneId = finalStartId;
   normalizeSceneOrder();
   saveProject(); render();
-  const mismatch = scenes.length === expectedNodes ? "" : `，模型实际返回 ${scenes.length}/${expectedNodes} 个节点`;
+  const mismatch = finalScenes.length === expectedNodes ? "" : `，模型实际返回 ${finalScenes.length}/${expectedNodes} 个分镜`;
   showToast(`文本模型剧情草案已生成${mismatch}。`);
 }
 
@@ -1012,6 +1183,37 @@ function renderSceneList() {
 
   elements.sceneList.innerHTML = "";
   const scenes = orderedScenes();
+  const groups = currentMode === "interactive" ? interactiveStoryGroups() : [];
+  if (currentMode === "interactive" && groups.some((group) => group.scenes.length > 1)) {
+    groups.forEach((group, groupIndex) => {
+      const container = document.createElement("section");
+      container.className = `scene-group${group.scenes.some((scene) => scene.id === project.selectedSceneId) ? " active" : ""}`;
+      const tail = group.scenes[group.scenes.length - 1];
+      const flowLabel = tail.choices.length ? `${tail.choices.length} 个选择` : tail.nextSceneId ? "自动进入下一剧情" : "结局";
+      container.innerHTML = `<header class="scene-group-header">
+        <span class="scene-group-index">${String(groupIndex + 1).padStart(2, "0")}</span>
+        <div><strong>${escapeHtml(storyNodeTitle(group.scenes[0]))}</strong><small>${group.scenes.length} 个分镜 · ${flowLabel}</small></div>
+      </header><div class="scene-group-shots"></div>`;
+      const list = container.querySelector(".scene-group-shots");
+      group.scenes.forEach((scene, shotIndex) => {
+        const item = document.createElement("div");
+        item.className = `scene-item scene-item-nested${scene.id === project.selectedSceneId ? " active" : ""}`;
+        item.draggable = true;
+        item.dataset.sceneId = scene.id;
+        const flow = scene.choices.length ? `${scene.choices.length} 个选择` : scene.nextSceneId ? "自动连接" : "结局";
+        item.innerHTML = `<span class="scene-index">${String(shotIndex + 1).padStart(2, "0")}</span>
+          <strong></strong><span class="scene-meta">${escapeHtml(scene.shot)} · ${scene.duration} 秒 · ${flow}</span>
+          ${scene.id === project.startSceneId ? '<span class="start-badge">起点</span>' : ""}
+          <span class="asset-dots"><i class="${statusClass(scene.imageStatus, scene.imageUrl || scene.imageLocalUrl)}"></i><i class="${statusClass(scene.videoStatus, scene.videoUrl || scene.videoLocalUrl)}"></i></span>`;
+        item.querySelector("strong").textContent = scene.title.replace(/\s*·\s*分镜\s*\d+\s*\/\s*\d+\s*$/, "");
+        item.addEventListener("click", () => { syncEditorToScene(); project.selectedSceneId = scene.id; saveProject(); render(); });
+        bindSceneDrag(item, scene.id, "list");
+        list.appendChild(item);
+      });
+      elements.sceneList.appendChild(container);
+    });
+    return;
+  }
 
   scenes.forEach((scene, index) => {
     const item = document.createElement("div");
@@ -1023,12 +1225,13 @@ function renderSceneList() {
       metaText = `第${activeEpisode()?.order + 1 || 1}集 · ${scene.episodeOrder || (index + 1)}号 · ${escapeHtml(scene.shot)} · ${scene.duration} 秒`;
     } else {
       const flowLabel = scene.choices.length ? `${scene.choices.length} 个选择` : scene.nextSceneId ? "自动连接" : "结局";
-      metaText = `${escapeHtml(scene.shot)} · ${scene.duration} 秒 · ${flowLabel}`;
+      const shotLabel = scene.shotsInNode > 1 ? `分镜 ${scene.shotInNode}/${scene.shotsInNode} · ` : "";
+      metaText = `${shotLabel}${escapeHtml(scene.shot)} · ${scene.duration} 秒 · ${flowLabel}`;
     }
     item.innerHTML = `<span class="scene-index">${String(index + 1).padStart(2, "0")}</span>
       <strong></strong><span class="scene-meta">${metaText}</span>
       ${scene.id === project.startSceneId ? '<span class="start-badge">起点</span>' : ""}
-      <span class="asset-dots"><i class="${statusClass(scene.imageStatus, scene.imageUrl)}"></i><i class="${statusClass(scene.videoStatus, scene.videoUrl)}"></i></span>`;
+      <span class="asset-dots"><i class="${statusClass(scene.imageStatus, scene.imageUrl || scene.imageLocalUrl)}"></i><i class="${statusClass(scene.videoStatus, scene.videoUrl || scene.videoLocalUrl)}"></i></span>`;
     item.querySelector("strong").textContent = scene.title;
     item.addEventListener("click", () => { syncEditorToScene(); project.selectedSceneId = scene.id; saveProject(); render(); });
     bindSceneDrag(item, scene.id, "list");
@@ -1275,10 +1478,33 @@ function storyTargets(scene) {
   return scene.nextSceneId ? [{ id: scene.nextSceneId, label: "继续" }] : [];
 }
 
+function storyNodeTitle(scene) {
+  return String(scene?.title || "未命名剧情节点").replace(/\s*·\s*分镜\s*\d+\s*\/\s*\d+\s*$/, "");
+}
+
+function interactiveStoryGroups() {
+  const groups = [];
+  const groupByKey = new Map();
+  orderedScenes().forEach((scene) => {
+    const key = scene.storyNodeKey || scene.id;
+    if (!groupByKey.has(key)) {
+      const group = { key, scenes: [] };
+      groupByKey.set(key, group);
+      groups.push(group);
+    }
+    groupByKey.get(key).scenes.push(scene);
+  });
+  return groups;
+}
+
 // ─────────────────────────────────────────────
 //  剧情树（互动影游 & 短剧通用，带面板拖拽平移）
 // ─────────────────────────────────────────────
 function buildTreeLayout() {
+  const sourceGroups = interactiveStoryGroups();
+  const shouldGroup = sourceGroups.some((group) => group.scenes.length > 1);
+  if (shouldGroup) return buildGroupedTreeLayout(sourceGroups);
+
   const byId = new Map(project.scenes.map((scene) => [scene.id, scene]));
   const depthById = new Map();
   const queue = project.startSceneId ? [{ id: project.startSceneId, depth: 0 }] : [];
@@ -1298,6 +1524,57 @@ function buildTreeLayout() {
     levels[depth].push(scene);
   });
   return { byId, depthById, levels };
+}
+
+function buildGroupedTreeLayout(sourceGroups) {
+  const sceneToGroupId = new Map();
+  const nodes = sourceGroups.map((group) => {
+    const groupId = `story:${group.key}`;
+    group.scenes.forEach((scene) => sceneToGroupId.set(scene.id, groupId));
+    const first = group.scenes[0];
+    const tail = group.scenes[group.scenes.length - 1];
+    return {
+      id: groupId,
+      selectSceneId: first.id,
+      sceneIds: group.scenes.map((scene) => scene.id),
+      title: storyNodeTitle(first),
+      shotCount: group.scenes.length,
+      choices: [],
+      nextSceneId: "",
+      imageCount: group.scenes.filter((scene) => scene.imageUrl || scene.imageLocalUrl).length,
+      videoCount: group.scenes.filter((scene) => scene.videoUrl || scene.videoLocalUrl).length,
+      imageStatus: group.scenes.some((scene) => scene.imageStatus === "working") ? "working" : "",
+      videoStatus: group.scenes.some((scene) => scene.videoStatus === "working") ? "working" : "",
+      tail,
+    };
+  });
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  nodes.forEach((node) => {
+    node.choices = (node.tail.choices || []).map((choice) => ({
+      ...choice,
+      targetSceneId: sceneToGroupId.get(choice.targetSceneId) || choice.targetSceneId,
+    }));
+    node.nextSceneId = sceneToGroupId.get(node.tail.nextSceneId) || node.tail.nextSceneId || "";
+  });
+  const depthById = new Map();
+  const startGroupId = sceneToGroupId.get(project.startSceneId) || nodes[0]?.id || "";
+  const queue = startGroupId ? [{ id: startGroupId, depth: 0 }] : [];
+  while (queue.length) {
+    const current = queue.shift();
+    if (!byId.has(current.id)) continue;
+    if (depthById.has(current.id) && depthById.get(current.id) <= current.depth) continue;
+    depthById.set(current.id, current.depth);
+    storyTargets(byId.get(current.id)).forEach((target) => queue.push({ id: target.id, depth: current.depth + 1 }));
+  }
+  const maxReachableDepth = Math.max(0, ...depthById.values());
+  nodes.forEach((node) => { if (!depthById.has(node.id)) depthById.set(node.id, maxReachableDepth + 1); });
+  const levels = [];
+  nodes.forEach((node) => {
+    const depth = depthById.get(node.id);
+    if (!levels[depth]) levels[depth] = [];
+    levels[depth].push(node);
+  });
+  return { byId, depthById, levels, nodes, grouped: true };
 }
 
 // 短剧：按集数分层布局
@@ -1398,8 +1675,8 @@ function renderTreeBrowser() {
   const { byId, depthById, levels } = layout;
 
   // 短剧模式节点稍宽，便于显示集数信息
-  const nodeWidth = currentMode === "serial" ? 200 : 190;
-  const nodeHeight = currentMode === "serial" ? 90 : 78;
+  const nodeWidth = currentMode === "serial" ? 200 : (layout.grouped ? 220 : 190);
+  const nodeHeight = currentMode === "serial" ? 90 : (layout.grouped ? 92 : 78);
   const columnGap = currentMode === "serial" ? 60 : 90;
   const rowGap = 22;
   const padding = 50;
@@ -1424,34 +1701,41 @@ function renderTreeBrowser() {
       const node = document.createElement("button");
       const isEnding = !scene.nextSceneId && !scene.choices.length;
       const isSerial = currentMode === "serial";
+      const isGrouped = Boolean(layout.grouped);
+      const isStart = isGrouped ? scene.sceneIds.includes(project.startSceneId) : scene.id === project.startSceneId;
+      const isSelected = isGrouped ? scene.sceneIds.includes(project.selectedSceneId) : scene.id === project.selectedSceneId;
       node.className = [
         "tree-node",
-        scene.id === project.startSceneId ? "start" : "",
+        isStart ? "start" : "",
         isEnding && !isSerial ? "ending" : "",
         isSerial ? "serial-node" : "",
-        scene.id === project.selectedSceneId ? "selected" : "",
+        isGrouped ? "grouped-node" : "",
+        isSelected ? "selected" : "",
       ].filter(Boolean).join(" ");
-      node.draggable = true;
-      node.title = "拖拽可调整同层节点顺序，双击进入编辑";
+      node.draggable = !isGrouped;
+      node.title = isGrouped ? "单击定位到该剧情的第一镜，双击返回编辑器" : "拖拽可调整同层节点顺序，双击进入编辑";
       node.style.left = `${x}px`; node.style.top = `${y}px`;
       node.style.width = `${nodeWidth}px`; node.style.height = `${nodeHeight}px`;
 
       // 节点内容
-      const imgDot = scene.imageUrl ? "●" : "○";
-      const vidDot = scene.videoUrl ? "●" : "○";
+      const imgDot = (scene.imageUrl || scene.imageLocalUrl) ? "●" : "○";
+      const vidDot = (scene.videoUrl || scene.videoLocalUrl) ? "●" : "○";
       const assetStatusClass = (scene.imageStatus === "working" || scene.videoStatus === "working") ? " node-generating" : "";
 
       if (isSerial) {
         const epLabel = `第${scene.episode || 1}集 · ${scene.episodeOrder || 1}`;
         node.innerHTML = `<small class="node-ep-label">${epLabel}</small><strong>${escapeHtml(scene.title)}</strong><span class="node-assets${assetStatusClass}"><span class="asset-icon img">${imgDot}</span>图 <span class="asset-icon vid">${vidDot}</span>视频</span>`;
+      } else if (isGrouped) {
+        const label = isStart ? `起点 · ${scene.shotCount} 分镜` : isEnding ? `结局 · ${scene.shotCount} 分镜` : `${scene.choices.length || 1} 条走向 · ${scene.shotCount} 分镜`;
+        node.innerHTML = `<small>${label}</small><strong>${escapeHtml(scene.title)}</strong><span class="node-assets${assetStatusClass}">图 ${scene.imageCount}/${scene.shotCount} · 视频 ${scene.videoCount}/${scene.shotCount}</span>`;
       } else {
         const label = scene.id === project.startSceneId ? "起点" : isEnding ? "结局" : `${scene.choices.length || 1} 条走向`;
         node.innerHTML = `<small>${label}</small><strong>${escapeHtml(scene.title)}</strong><span class="node-assets${assetStatusClass}"><span class="asset-icon img">${imgDot}</span>图 <span class="asset-icon vid">${vidDot}</span>视频</span>`;
       }
 
-      node.addEventListener("click", () => { project.selectedSceneId = scene.id; saveProject(); renderTreeBrowser(); });
-      node.addEventListener("dblclick", () => { project.selectedSceneId = scene.id; saveProject(); closeTreeBrowser(); render(); });
-      bindSceneDrag(node, scene.id, "tree", depthById);
+      node.addEventListener("click", () => { project.selectedSceneId = scene.selectSceneId || scene.id; saveProject(); renderTreeBrowser(); });
+      node.addEventListener("dblclick", () => { project.selectedSceneId = scene.selectSceneId || scene.id; saveProject(); closeTreeBrowser(); render(); });
+      if (!isGrouped) bindSceneDrag(node, scene.id, "tree", depthById);
       elements.treeNodes.appendChild(node);
     });
   });
@@ -1461,7 +1745,7 @@ function renderTreeBrowser() {
   elements.treeEdges.setAttribute("viewBox", `0 0 ${canvasWidth} ${canvasHeight}`);
   const paths = [];
 
-  project.scenes.forEach((scene) => {
+  (layout.nodes || project.scenes).forEach((scene) => {
     const source = positions.get(scene.id);
     if (!source) return;
     storyTargets(scene).forEach((target) => {
@@ -1476,11 +1760,15 @@ function renderTreeBrowser() {
   });
   elements.treeEdges.innerHTML = paths.join("");
 
-  const endings = project.scenes.filter((scene) => !scene.nextSceneId && !scene.choices.length).length;
+  const treeScenes = layout.nodes || project.scenes;
+  const endings = treeScenes.filter((scene) => !scene.nextSceneId && !scene.choices.length).length;
   if (currentMode === "serial") {
     $("#treeStats").textContent = `${activeEpisode()?.meta.title || "当前集"} · ${project.scenes.length} 镜头`;
   } else {
-    $("#treeStats").textContent = `${project.scenes.length} 节点 · ${endings} 结局`;
+    const storyNodes = new Set(project.scenes.map((scene) => scene.storyNodeKey || scene.id)).size;
+    $("#treeStats").textContent = storyNodes < project.scenes.length
+      ? `${storyNodes} 剧情节点 · ${project.scenes.length} 分镜 · ${endings} 结局`
+      : `${project.scenes.length} 节点 · ${endings} 结局`;
   }
   $("#treeZoomResetBtn").textContent = `${Math.round(treeZoom * 100)}%`;
 }
@@ -1506,7 +1794,8 @@ function startStoryPreview(startSceneId = project.startSceneId) {
   if (!project.scenes.length) return showToast("请先创建剧情节点。", true);
   const start = project.scenes.find((scene) => scene.id === startSceneId);
   if (!start) return showToast("试玩起点不存在。", true);
-  playerState = { sceneId: start.id, history: [], startSceneId: start.id };
+  clearStoryAutoTimer();
+  playerState = { sceneId: start.id, history: [], startSceneId: start.id, autoTimer: null };
   const meta = readMetaFromForm();
   $("#playerProjectTitle").textContent = meta.title;
   applyStoryPlayerAspect(meta.aspectRatio);
@@ -1523,6 +1812,7 @@ function applyStoryPlayerAspect(aspectRatio) {
 }
 
 function closeStoryPreview() {
+  clearStoryAutoTimer();
   const video = elements.playerStage.querySelector("video");
   if (video) video.pause();
   if (document.fullscreenElement === elements.storyPlayer) document.exitFullscreen().catch(() => {});
@@ -1545,6 +1835,7 @@ function updateFullscreenButton() {
 }
 
 function goToPlayerScene(targetSceneId, choiceText = "") {
+  clearStoryAutoTimer();
   const target = project.scenes.find((scene) => scene.id === targetSceneId);
   if (!target) return showToast("这个选择尚未连接到有效剧情节点。", true);
   playerState.history.push({ sceneId: playerState.sceneId, choiceText });
@@ -1552,12 +1843,28 @@ function goToPlayerScene(targetSceneId, choiceText = "") {
   renderStoryPlayer();
 }
 
+function clearStoryAutoTimer() {
+  if (playerState.autoTimer) { clearTimeout(playerState.autoTimer); playerState.autoTimer = null; }
+}
+
+function shouldAutoContinueStory(scene) {
+  return Boolean(scene?.nextSceneId && !scene.choices.length && scene.shotsInNode > 1);
+}
+
+function autoContinueStory(scene) {
+  if (!shouldAutoContinueStory(scene)) return;
+  goToPlayerScene(scene.nextSceneId);
+}
+
 function renderStoryPlayer() {
   const scene = project.scenes.find((item) => item.id === playerState.sceneId);
   if (!scene) return closeStoryPreview();
+  clearStoryAutoTimer();
   applyStoryPlayerAspect(readMetaFromForm().aspectRatio);
   const index = project.scenes.findIndex((item) => item.id === scene.id);
-  $("#playerProgress").textContent = `节点 ${String(index + 1).padStart(2, "0")} · 已做出 ${playerState.history.filter((item) => item.choiceText).length} 次选择`;
+  $("#playerProgress").textContent = scene.shotsInNode > 1
+    ? `分镜 ${scene.shotInNode}/${scene.shotsInNode} · 已做出 ${playerState.history.filter((item) => item.choiceText).length} 次选择`
+    : `节点 ${String(index + 1).padStart(2, "0")} · 已做出 ${playerState.history.filter((item) => item.choiceText).length} 次选择`;
   $("#playerSceneTitle").textContent = scene.title;
   $("#playerAction").textContent = scene.action || "";
   $("#playerDialogue").textContent = scene.dialogue || "";
@@ -1569,13 +1876,16 @@ function renderStoryPlayer() {
     const frame = document.createElement("div"); frame.className = "player-media-frame";
     const video = document.createElement("video");
     video.src = videoUrl; video.controls = true; video.autoplay = true; video.playsInline = true;
+    if (shouldAutoContinueStory(scene)) video.addEventListener("ended", () => autoContinueStory(scene), { once: true });
     frame.appendChild(video); elements.playerStage.appendChild(frame);
   } else if (imageUrl) {
     const frame = document.createElement("div"); frame.className = "player-media-frame";
     const image = document.createElement("img"); image.src = imageUrl; image.alt = scene.title;
     frame.appendChild(image); elements.playerStage.appendChild(frame);
+    if (shouldAutoContinueStory(scene)) playerState.autoTimer = setTimeout(() => autoContinueStory(scene), (scene.duration || 8) * 1000);
   } else {
     elements.playerStage.innerHTML = `<div class="player-no-media"><span>${String(index + 1).padStart(2, "0")}</span><strong>${escapeHtml(scene.title)}</strong><small>该节点尚未生成影音素材</small></div>`;
+    if (shouldAutoContinueStory(scene)) playerState.autoTimer = setTimeout(() => autoContinueStory(scene), 3000);
   }
   const choices = $("#playerChoices"); choices.innerHTML = "";
   if (scene.choices.length) {
@@ -1773,6 +2083,8 @@ function renderMedia(scene) {
     saveButton.hidden = Boolean(scene.videoLocalUrl);
     saveButton.addEventListener("click", () => saveAsset(scene, "video", saveButton));
   }
+  renderMediaPathEditor(scene, "image", elements.imageCard);
+  renderMediaPathEditor(scene, "video", elements.videoCard);
 }
 
 function openMediaPreview(kind, url, title) {
@@ -1824,6 +2136,7 @@ async function saveAsset(scene, kind, button = null, quiet = false) {
       url: remoteUrl, kind, project_title: readMetaFromForm().title, scene_id: scene.id,
     }) });
     scene[`${kind}LocalUrl`] = result.localUrl;
+    scene[`${kind}Path`] = result.path || "";
     saveProject();
     if (!quiet) showToast(`${kind === "image" ? "图片" : "视频"}已保存到 ${result.path}`);
     return result.localUrl;
@@ -1874,6 +2187,36 @@ function render() {
   renderEditor();
   if (currentMode === "serial") updateSerialEstimate();
 }
+
+function renderMediaPathEditor(scene, kind, card) {
+  const label = kind === "image" ? "图片路径" : "视频路径";
+  const editor = document.createElement("div");
+  editor.className = "media-path-editor";
+  editor.innerHTML = `<label><span>${label}</span><input type="text" spellcheck="false" placeholder="projects 内的本地路径，或 https:// 素材地址"></label><button class="button ghost media-path-apply">应用</button>`;
+  const input = editor.querySelector("input");
+  input.value = scene[`${kind}Path`] || scene[`${kind}LocalUrl`] || scene[`${kind}Url`] || "";
+  const apply = async () => {
+    const value = input.value.trim();
+    const button = editor.querySelector("button");
+    if (!value) {
+      scene[`${kind}Url`] = ""; scene[`${kind}LocalUrl`] = ""; scene[`${kind}Path`] = ""; scene[`${kind}Status`] = "idle";
+      saveProject(); renderMedia(scene); return;
+    }
+    if (/^https:\/\//i.test(value)) {
+      scene[`${kind}Url`] = value; scene[`${kind}LocalUrl`] = ""; scene[`${kind}Path`] = ""; scene[`${kind}Status`] = "completed";
+      saveProject(); renderMedia(scene); showToast(`${label}已更新。`); return;
+    }
+    button.disabled = true; button.textContent = "检查中…";
+    try {
+      const result = await requestJson("/api/resolve-asset-path", { method: "POST", body: JSON.stringify({ path: value, kind }) });
+      scene[`${kind}LocalUrl`] = result.localUrl; scene[`${kind}Path`] = result.path; scene[`${kind}Status`] = "completed";
+      saveProject(); renderMedia(scene); showToast(`${label}已恢复：${result.path}`);
+    } catch (error) { showToast(error.message, true); button.disabled = false; button.textContent = "应用"; }
+  };
+  editor.querySelector("button").addEventListener("click", apply);
+  input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); apply(); } });
+  card.appendChild(editor);
+}
 function renderTaskResult(scene) {
   renderSceneList();
   if (project.selectedSceneId === scene.id) renderEditor();
@@ -1889,11 +2232,19 @@ async function requestJson(url, options = {}) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    const detailObj = data.details || {};
     const detailValue = typeof data.details === "string"
       ? data.details
-      : data.details?.message || data.details?.detail || data.details?.error?.message || "";
+      : detailObj.message || detailObj.detail || detailObj.error?.message
+        || (detailObj.error_kind ? `[${detailObj.error_kind}] ${detailObj.error_detail || ""}` : "")
+        || "";
     const details = detailValue ? ` ${detailValue}` : "";
-    throw new Error((data.error || `请求失败 (${response.status})`) + details);
+    const error = new Error((data.error || `请求失败 (${response.status})`) + details);
+    error.status = response.status;
+    error.retryable = detailObj.retryable;
+    error.reason = detailObj.reason || "";
+    error.errorKind = detailObj.error_kind || "";
+    throw error;
   }
   return data;
 }
@@ -1946,7 +2297,7 @@ async function resetAsset(kind) {
     activeTasks.get(key)?.controller.abort();
     activeTasks.delete(key);
     scene[`${item}Status`] = "idle"; scene[`${item}PredictionId`] = "";
-    scene[`${item}Url`] = ""; scene[`${item}LocalUrl`] = "";
+    scene[`${item}Url`] = ""; scene[`${item}LocalUrl`] = ""; scene[`${item}Path`] = "";
   });
   saveProject(); renderTaskResult(scene);
   const failures = [];
@@ -1981,6 +2332,7 @@ async function pollPrediction(id, onProgress, signal, kind) {
       consecutiveErrors = 0;
     } catch (error) {
       if (error.name === "AbortError" || signal?.aborted) throw error;
+      if (error.retryable === false || [400, 401, 402, 403, 404].includes(error.status)) throw error;
       consecutiveErrors += 1;
       if (consecutiveErrors >= 8) throw new Error(`任务查询连续失败 ${consecutiveErrors} 次：${error.message}`);
       onProgress?.("reconnecting");
@@ -2031,7 +2383,7 @@ async function generateImage() {
     scene.imageUrl = await pollPrediction(scene.imagePredictionId, null, task.controller.signal, "image");
     if (!isTaskActive(scene, "image", task)) throw new DOMException("任务已清除", "AbortError");
     scene.imageStatus = "completed"; scene.imagePredictionId = "";
-    scene.imageLocalUrl = ""; scene.videoUrl = ""; scene.videoLocalUrl = ""; scene.videoStatus = "idle";
+    scene.imageLocalUrl = ""; scene.imagePath = ""; scene.videoUrl = ""; scene.videoLocalUrl = ""; scene.videoPath = ""; scene.videoStatus = "idle";
     await saveAsset(scene, "image", null, true);
     showToast(scene.imageLocalUrl ? "关键帧生成完成并已保存到项目。" : "关键帧生成完成，可使用保存按钮落盘。");
   } catch (error) {
@@ -2045,7 +2397,7 @@ async function generateImage() {
 async function generateVideo() {
   syncEditorToScene();
   const scene = selectedScene();
-  if (!scene?.imageUrl) return showToast("请先为当前镜头生成关键帧。", true);
+  if (!scene?.imageUrl && !scene?.imageLocalUrl) return showToast("请先为当前镜头生成关键帧。", true);
   if (!scene.videoPrompt) return showToast("请先填写运镜提示词。", true);
   const dialogueLength = spokenCharacterCount(scene.dialogue);
   const budget = dialogueBudget(scene.duration);
@@ -2060,7 +2412,7 @@ async function generateVideo() {
   scene.videoStatus = "working"; scene.videoPredictionId = ""; saveProject(); render();
   try {
     const started = await requestJson("/api/generate-video", { method: "POST", body: JSON.stringify({
-      prompt: scene.videoPrompt, image_url: scene.imageUrl, duration: scene.duration,
+      prompt: scene.videoPrompt, image_url: scene.imageUrl || scene.imageLocalUrl, duration: scene.duration,
       resolution: $("#videoResolution").value, aspect_ratio: project.meta.aspectRatio,
       video_base_url: provider.baseUrl, video_api_key: provider.apiKey, video_model: project.meta.videoModel,
     }), signal: task.controller.signal });
@@ -2069,7 +2421,7 @@ async function generateVideo() {
     if (project.selectedSceneId === scene.id) renderMedia(scene);
     scene.videoUrl = await pollPrediction(scene.videoPredictionId, null, task.controller.signal, "video");
     if (!isTaskActive(scene, "video", task)) throw new DOMException("任务已清除", "AbortError");
-    scene.videoStatus = "completed"; scene.videoPredictionId = ""; scene.videoLocalUrl = "";
+    scene.videoStatus = "completed"; scene.videoPredictionId = ""; scene.videoLocalUrl = ""; scene.videoPath = "";
     await saveAsset(scene, "video", null, true);
     showToast(scene.videoLocalUrl ? "视频生成完成并已保存到项目。" : "视频生成完成，可使用保存按钮落盘。");
   } catch (error) {
@@ -2087,9 +2439,9 @@ async function resumeTask(scene, kind) {
   scene[`${kind}Status`] = "working"; saveProject(); render();
   try {
     const output = await pollPrediction(predictionIdValue, null, task.controller.signal, kind);
-    scene[`${kind}Url`] = output; scene[`${kind}LocalUrl`] = "";
+    scene[`${kind}Url`] = output; scene[`${kind}LocalUrl`] = ""; scene[`${kind}Path`] = "";
     scene[`${kind}Status`] = "completed"; scene[`${kind}PredictionId`] = "";
-    if (kind === "image") { scene.videoUrl = ""; scene.videoLocalUrl = ""; scene.videoStatus = "idle"; }
+    if (kind === "image") { scene.videoUrl = ""; scene.videoLocalUrl = ""; scene.videoPath = ""; scene.videoStatus = "idle"; }
     await saveAsset(scene, kind, null, true);
     showToast(`${kind === "image" ? "关键帧" : "视频"}任务已完成并恢复。`);
   } catch (error) {
@@ -2131,7 +2483,7 @@ async function persistProject() {
   button.disabled = true; button.textContent = "保存中…";
   try {
     const result = await requestJson("/api/save-project", { method: "POST", body: JSON.stringify({ project }) });
-    showToast(`项目已保存到 ${result.path}`);
+    showToast(result.backupPath ? `项目已保存到 ${result.path}；旧版本已备份。` : `项目已保存到 ${result.path}`);
   } catch (error) { showToast(error.message, true); }
   finally { button.disabled = false; button.textContent = "保存项目"; }
 }
@@ -2140,6 +2492,8 @@ async function importProject(file) {
     const parsed = JSON.parse(await file.text());
     const hasScenes = Array.isArray(parsed?.scenes) || Array.isArray(parsed?.interactive?.scenes) || Array.isArray(parsed?.episodes);
     if (!parsed?.meta || !hasScenes) throw new Error("不是有效的 Narrative Forge 项目文件。");
+    if (project.scenes.length && !confirm("导入会替换当前工作区项目。系统会保留一份可撤销快照，确定继续吗？")) return;
+    if (project.scenes.length) snapshotProjectBeforeReplacement(`导入“${parsed.meta.title || file.name}”前`);
     project = normalizeProject(parsed);
     project.selectedSceneId = project.selectedSceneId || project.scenes[0]?.id || null;
     applyMetaToForm(); saveProject(); render(); showToast("项目已导入。");
@@ -2242,7 +2596,8 @@ function bindEvents() {
   // 互动影游试玩
   $("#previewStoryBtn").addEventListener("click", () => startStoryPreview(project.startSceneId));
   $("#restartStoryBtn").addEventListener("click", () => {
-    playerState = { sceneId: playerState.startSceneId, history: [], startSceneId: playerState.startSceneId };
+    clearStoryAutoTimer();
+    playerState = { sceneId: playerState.startSceneId, history: [], startSceneId: playerState.startSceneId, autoTimer: null };
     renderStoryPlayer();
   });
   $("#fullscreenStoryBtn").addEventListener("click", toggleStoryFullscreen);
@@ -2301,6 +2656,7 @@ function bindEvents() {
   // 项目管理
   $("#exportBtn").addEventListener("click", exportProject);
   $("#saveProjectBtn").addEventListener("click", persistProject);
+  $("#restoreProjectBtn").addEventListener("click", restoreProjectSnapshot);
   $("#importBtn").addEventListener("click", () => $("#importInput").click());
   $("#importInput").addEventListener("change", (event) => { if (event.target.files[0]) importProject(event.target.files[0]); event.target.value = ""; });
   $("#openProjectFolderBtn").addEventListener("click", () => openAssetFolder());
@@ -2315,7 +2671,8 @@ function bindEvents() {
   ].forEach((element) => element.addEventListener("change", saveProject));
   [elements.projectTextApiKey, elements.projectImageApiKey, elements.projectVideoApiKey]
     .forEach((element) => element.addEventListener("change", saveProviderSecrets));
-  [elements.projectTreeDepth, elements.projectBranchCount].forEach((element) => element.addEventListener("change", () => { updateTreeEstimate(); saveProject(); }));
+  [elements.projectTreeDepth, elements.projectBranchCount, elements.projectInteractiveShotsPerNode]
+    .forEach((element) => element?.addEventListener("change", () => { updateTreeEstimate(); saveProject(); }));
   ["projectEpisodeCount", "projectShotsPerEpisode", "projectSerialTone"].forEach((id) => {
     const el = $(`#${id}`);
     if (el) el.addEventListener("change", () => { updateSerialEstimate(); saveProject(); });
@@ -2359,5 +2716,6 @@ window.FrameForgeFeatures.register({
     render();
     document.body.dataset.appReady = "true";
     checkHealth();
+    updateRecoveryButton();
   },
 });

@@ -15,8 +15,9 @@ pip-log.txt
 pip-delete-this-directory.txt
 .eggs/
 *.egg-info/
-dist/
-build/
+/dist/
+/build/
+!static/dist/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
@@ -81,3 +82,4 @@ tests/
 # static/*.mp4
 # static/*.jpg
 项目优化方案.md
+.workbuddy/

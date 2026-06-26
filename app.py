@@ -34,7 +34,8 @@ PLAYER_DIR = ROOT / "player"
 PROJECTS_DIR = ROOT / "projects"
 ATLAS_API_BASE_URL = "https://api.atlascloud.ai/api/v1"
 ATLAS_MODEL_BASE_URL = f"{ATLAS_API_BASE_URL}/model"
-ATLAS_LLM_BASE_URL = "https://api.atlascloud.ai/v1"
+TEXT_BASE_URL = "https://api.atlascloud.ai/v1"
+TEXT_BASE_URL = os.environ.get("TEXT_BASE_URL") or TEXT_BASE_URL
 # 供应商配置文件：存放 BaseURL、Model ID、API Key（本地模式）
 PROVIDER_CONFIG_FILE = PROJECTS_DIR / "_provider_config.json"
 
@@ -999,7 +1000,7 @@ class DirectorHandler(SimpleHTTPRequestHandler):
 
     def generate_story(self, data):
         payload = build_story_payload(data)
-        base_url = require_provider_base_url(data, "text_base_url", ATLAS_LLM_BASE_URL)
+        base_url = require_provider_base_url(data, "text_base_url", TEXT_BASE_URL)
         api_key = provider_api_key(data, "text_api_key", "TEXT_MODEL_API_KEY")
         self.send_json(200, atlas_request(
             "chat/completions", "POST", payload, base_url, api_key,
@@ -1008,7 +1009,7 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         ))
 
     def generate_episode(self, data):
-        base_url = require_provider_base_url(data, "text_base_url", ATLAS_LLM_BASE_URL)
+        base_url = require_provider_base_url(data, "text_base_url", TEXT_BASE_URL)
         api_key = provider_api_key(data, "text_api_key", "TEXT_MODEL_API_KEY")
         prompt = require_string(data, "prompt", 50000)
         payload = {
@@ -1030,7 +1031,7 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         ))
 
     def test_text_provider(self, data):
-        base_url = require_provider_base_url(data, "text_base_url", ATLAS_LLM_BASE_URL)
+        base_url = require_provider_base_url(data, "text_base_url", TEXT_BASE_URL)
         api_key = provider_api_key(data, "text_api_key", "TEXT_MODEL_API_KEY")
         payload = {
             "model": require_model(data, "model", "deepseek-v3"),
@@ -1410,7 +1411,7 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         事件类型：text | tool_use | tool_result | done | error
         """
         user_msg = require_string(data, "message", 10000)
-        base_url = require_provider_base_url(data, "text_base_url", ATLAS_LLM_BASE_URL)
+        base_url = require_provider_base_url(data, "text_base_url", TEXT_BASE_URL)
         api_key = provider_api_key(data, "text_api_key", "TEXT_MODEL_API_KEY")
         model = data.get("model", "deepseek-v3")
         if not isinstance(model, str) or not model.strip():

@@ -20,7 +20,12 @@ import requests
 
 from backend.publishing import build_player_package
 from backend.route_registry import API_ROUTES
-from backend.serial_exporting import build_serial_package
+from backend.serial_exporting import build_serial_package, _ExportCancelled as serial_cancelled_error
+from backend import providers
+from backend.jobs import JobManager, JobCancelled
+from backend.agent import Agent, OpenAICompatClient, ToolRegistry
+from backend.agent.narrative_tools import ProjectContext, build_narrative_tools
+from backend.agent.conversation import ConversationManager as AgentConversation
 
 
 ROOT = Path(__file__).resolve().parent
@@ -30,6 +35,25 @@ PROJECTS_DIR = ROOT / "projects"
 ATLAS_API_BASE_URL = "https://api.atlascloud.ai/api/v1"
 ATLAS_MODEL_BASE_URL = f"{ATLAS_API_BASE_URL}/model"
 ATLAS_LLM_BASE_URL = "https://api.atlascloud.ai/v1"
+# 供应商配置文件：存放 BaseURL、Model ID、API Key（本地模式）
+PROVIDER_CONFIG_FILE = PROJECTS_DIR / "_provider_config.json"
+
+# 环境变量名 → 配置字段 映射（Railway / .env 场景）
+_ENV_TO_FIELD = {
+    "TEXT_MODEL_API_KEY":  "textApiKey",
+    "IMAGE_MODEL_API_KEY": "imageApiKey",
+    "VIDEO_MODEL_API_KEY": "videoApiKey",
+    "ATLASCLOUD_API_KEY":  "textApiKey",   # 通用兜底
+    "TEXT_BASE_URL":       "textBaseUrl",
+    "TEXT_MODEL":          "textModel",
+    "IMAGE_BASE_URL":      "imageBaseUrl",
+    "IMAGE_MODEL":         "imageModel",
+    "IMAGE_EDIT_MODEL":    "imageEditModel",
+    "VIDEO_BASE_URL":      "videoBaseUrl",
+    "VIDEO_MODEL":         "videoModel",
+    "IMAGE_PROVIDER":      "imageProvider",
+    "VIDEO_PROVIDER":      "videoProvider",
+}
 MAX_BODY_SIZE = 5_000_000
 MAX_MEDIA_SIZE = 750 * 1024 * 1024
 PREDICTION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
@@ -38,11 +62,18 @@ INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 WHITESPACE_RE = re.compile(r"\s+")
 GENERATED_MEDIA_URLS = set()
 GENERATED_MEDIA_LOCK = threading.Lock()
+# 同步型图像供应商（如 OpenAI /images/generations）提交即返回结果；
+# 用 token → outputs 缓存，让前端「提交→轮询」流程对同步供应商无感复用。
+SYNC_RESULTS = {}
+SYNC_RESULTS_LOCK = threading.Lock()
 KNOWN_MEDIA_HOSTS = {
     "atlas-img.oss-us-west-1.aliyuncs.com",
 }
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 APP_VERSION = "2026.06.22-minimax-fix-v24"
+
+# 后台任务管理器：导出等耗时操作异步执行，HTTP 端点只负责提交/查询/取消。
+JOBS = JobManager(max_workers=2)
 
 
 class ApiError(Exception):
@@ -139,6 +170,7 @@ def atlas_request(
     provider_name="模型供应商",
     read_timeout=90,
     max_attempts=None,
+    extra_headers=None,
 ):
     api_key = (api_key or os.environ.get("ATLASCLOUD_API_KEY", "")).strip()
     if not api_key:
@@ -152,6 +184,8 @@ def atlas_request(
         "User-Agent": requests.utils.default_user_agent(),
         "Connection": "close",
     }
+    if extra_headers:
+        headers.update(extra_headers)
     if payload is not None:
         headers["Content-Type"] = "application/json"
     if method.upper() == "POST" and retry_post:
@@ -257,6 +291,49 @@ def atlas_request(
         return response.json()
     except requests.JSONDecodeError as exc:
         raise ApiError(502, f"{provider_name}返回了无效的 JSON。") from exc
+
+
+def provider_probe(base_url, api_key, spec, provider_name):
+    """零成本测试连接：只校验「能连通 + 鉴权通过」，不真正生成素材。
+
+    判定规则：
+      - 网络层失败（DNS/超时/重置等）→ 连接失败
+      - HTTP 401 / 403 → 鉴权失败
+      - 其余任何 HTTP 响应（含 400 / 404）→ 视为连通且鉴权通过
+    """
+    api_key = (api_key or os.environ.get("ATLASCLOUD_API_KEY", "")).strip()
+    if not api_key:
+        raise ApiError(503, f"未配置{provider_name} API Key。")
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": requests.utils.default_user_agent(),
+        "Connection": "close",
+    }
+    headers.update(spec.get("extra_headers") or {})
+    method = spec.get("method", "GET").upper()
+    if spec.get("json") is not None:
+        headers["Content-Type"] = "application/json"
+    url = f"{base_url.rstrip('/')}/{spec['path'].lstrip('/')}"
+    try:
+        response = requests.request(method, url, headers=headers, json=spec.get("json"), timeout=(15, 30))
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        info = classify_connection_error(exc)
+        raise ApiError(502, f"无法连接{provider_name}：{info['summary']}", {
+            "retryable": True, "error_kind": info["kind"], "target_host": urlparse(url).hostname or "",
+        }) from exc
+    except requests.RequestException as exc:
+        raise ApiError(502, f"无法连接{provider_name}：{connection_error_message(exc)}") from exc
+    try:
+        status = response.status_code
+        if status in (401, 403):
+            raise ApiError(status, f"{provider_name}鉴权失败（HTTP {status}）。请检查 API Key 是否正确、是否有访问权限。", {
+                "retryable": False, "reason": "auth_failed" if status == 401 else "forbidden",
+            })
+        # 任何能返回 HTTP 状态码的响应都说明 Base URL 可达且鉴权未被拒绝
+        return status
+    finally:
+        response.close()
 
 
 def is_connection_reset(exc):
@@ -405,33 +482,38 @@ def build_story_payload(data):
 
 
 def build_image_payload(data):
+    """旧契约：直接构造 AtlasCloud generateImage 请求体（测试与默认供应商复用）。"""
+    return providers.get_adapter("image", "atlascloud").submit_spec(validate_image_params(data))["json"]
+
+
+def validate_image_params(data):
+    """校验并归一化通用文生图参数，供任意图像适配器使用。"""
     allowed_sizes = {"1024x1024", "1536x1024", "1024x1536", "auto"}
     size = data.get("size", "1536x1024")
     if size not in allowed_sizes:
         raise ApiError(400, "不支持的图像尺寸。")
-
     output_format = data.get("output_format", "jpeg")
     quality = data.get("quality", "high")
     if output_format not in {"jpeg", "png"}:
         raise ApiError(400, "不支持的图片格式。")
     if quality not in {"low", "medium", "high"}:
         raise ApiError(400, "不支持的图片质量。")
-
-    reference_url = data.get("reference_image_url", "")
-    payload = {
+    params = {
         "model": require_model(data, "image_model", "openai/gpt-image-2/text-to-image"),
-        "enable_base64_output": False,
-        "enable_sync_mode": False,
-        "output_format": output_format,
+        "edit_model": data.get("image_edit_model", ""),
         "prompt": require_string(data, "prompt"),
         "quality": quality,
         "size": size,
+        "output_format": output_format,
         "moderation": data.get("moderation", "low"),
+        "reference_image": "",
     }
+    reference_url = data.get("reference_image_url", "")
     if reference_url:
-        payload["model"] = require_model(data, "image_edit_model", "openai/gpt-image-2/edit")
-        payload["images"] = [resolve_reference_image(require_string(data, "reference_image_url", 10000))]
-    return payload
+        # 校验编辑模型 ID（旧逻辑：有参考图才要求该字段是合法模型 ID）
+        params["edit_model"] = require_model(data, "image_edit_model", "openai/gpt-image-2/edit")
+        params["reference_image"] = resolve_reference_image(require_string(data, "reference_image_url", 10000))
+    return params
 
 
 def resolve_reference_image(value):
@@ -455,29 +537,34 @@ def resolve_reference_image(value):
 
 
 def build_video_payload(data):
+    """旧契约：直接构造 AtlasCloud generateVideo 请求体（测试与默认供应商复用）。"""
+    return providers.get_adapter("video", "atlascloud").submit_spec(validate_video_params(data))["json"]
+
+
+def validate_video_params(data):
+    """校验并归一化通用图生视频参数，供任意视频适配器使用。"""
     duration = data.get("duration", 8)
     if not isinstance(duration, int) or not 1 <= duration <= 15:
         raise ApiError(400, "视频时长必须是 1 到 15 秒的整数。")
-
     image_url = require_string(data, "image_url", 200000)
     if image_url.startswith("/projects/"):
         image_url = resolve_reference_image(image_url)
     if not (image_url.startswith("https://") or image_url.startswith("data:image/")):
         raise ApiError(400, "起始图片必须是 HTTPS URL 或图片 data URI。")
-
-    payload = {
+    resolution = data.get("resolution", "720p")
+    aspect_ratio = data.get("aspect_ratio", "16:9")
+    if resolution not in {"480p", "720p"}:
+        raise ApiError(400, "不支持的视频分辨率。")
+    if aspect_ratio not in {"16:9", "9:16", "1:1"}:
+        raise ApiError(400, "不支持的视频画幅。")
+    return {
         "model": require_model(data, "video_model", "xai/grok-imagine-video-v1.5/image-to-video"),
         "prompt": require_string(data, "prompt"),
         "image_url": image_url,
         "duration": duration,
-        "resolution": data.get("resolution", "720p"),
-        "aspect_ratio": data.get("aspect_ratio", "16:9"),
+        "resolution": resolution,
+        "aspect_ratio": aspect_ratio,
     }
-    if payload["resolution"] not in {"480p", "720p"}:
-        raise ApiError(400, "不支持的视频分辨率。")
-    if payload["aspect_ratio"] not in {"16:9", "9:16", "1:1"}:
-        raise ApiError(400, "不支持的视频画幅。")
-    return payload
 
 
 def safe_name(value, fallback="item"):
@@ -754,6 +841,100 @@ class DirectorHandler(SimpleHTTPRequestHandler):
             "keyConfigured": bool(os.environ.get("ATLASCLOUD_API_KEY", "").strip()),
         })
 
+    # ── 供应商配置持久化 ─────────────────────────────────────────────────────────
+
+    def _load_provider_config_file(self) -> dict:
+        """从 PROVIDER_CONFIG_FILE 读取已保存的供应商配置，失败返回空字典。"""
+        try:
+            if PROVIDER_CONFIG_FILE.exists():
+                return json.loads(PROVIDER_CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    def _env_provider_overrides(self) -> dict:
+        """读取环境变量，返回需要覆盖的字段 dict。
+        API Key 如果来自环境变量，用 sentinel "__env__" 标记，
+        前端收到后知道 key 已在服务器端配置、不需要本地填写。
+        """
+        overrides: dict = {}
+        # 先读 ATLASCLOUD_API_KEY 作为通用兜底
+        fallback_key = os.environ.get("ATLASCLOUD_API_KEY", "").strip()
+        for env_name, field in _ENV_TO_FIELD.items():
+            val = os.environ.get(env_name, "").strip()
+            if not val:
+                continue
+            if field.endswith("ApiKey"):
+                overrides[field] = "__env__"  # key 不回传给前端
+            else:
+                overrides[field] = val
+        # 通用兜底：若 textApiKey/imageApiKey/videoApiKey 都没被任何专用 env 覆盖，
+        # 用 ATLASCLOUD_API_KEY 填充
+        if fallback_key:
+            for key_field in ("textApiKey", "imageApiKey", "videoApiKey"):
+                if key_field not in overrides:
+                    overrides[key_field] = "__env__"
+        return overrides
+
+    def get_provider_config(self, parsed_request, suffix):
+        """GET /api/provider-config — 读取本地配置并合并环境变量覆盖。"""
+        config = self._load_provider_config_file()
+        env_overrides = self._env_provider_overrides()
+        # 环境变量优先级最高，但 API Key 只标记 "__env__" 而非返回明文
+        merged = {**config, **env_overrides}
+        # 标记哪些 key 是来自环境变量（前端据此显示「已由服务器配置」）
+        merged["_envKeys"] = {
+            k: True for k, v in env_overrides.items() if v == "__env__"
+        }
+        # 实际 key 值不回传（以 __env__ 为标记的字段从结果中移除 key 值）
+        for field, val in list(merged.items()):
+            if val == "__env__":
+                merged[field] = ""  # 回传空字符串，前端 placeholder 提示
+        self.send_json(200, {"ok": True, "config": merged})
+
+    def save_provider_config(self, data):
+        """POST /api/provider-config — 写入供应商配置（仅本地模式下有效）。
+        来自环境变量的字段不会被覆盖。
+        """
+        allowed_fields = {
+            "textBaseUrl", "textModel",
+            "imageBaseUrl", "imageModel", "imageEditModel",
+            "videoBaseUrl", "videoModel",
+            "imageProvider", "videoProvider",
+            # API Key 字段也允许本地保存（用户主动填写时）
+            "textApiKey", "imageApiKey", "videoApiKey",
+        }
+        env_overrides = self._env_provider_overrides()
+        env_protected_fields = set(env_overrides.keys())
+
+        current = self._load_provider_config_file()
+        for field in allowed_fields:
+            if field in env_protected_fields:
+                continue  # 环境变量已设置，不允许文件覆盖
+            val = data.get(field)
+            if val is None:
+                continue
+            if not isinstance(val, str):
+                raise ApiError(400, f"字段 {field} 必须是字符串。")
+            val = val.strip()
+            if len(val) > 2000:
+                raise ApiError(400, f"字段 {field} 过长。")
+            # API Key 特殊：空字符串视为清除
+            if field.endswith("ApiKey") and not val:
+                current.pop(field, None)
+            else:
+                if val:
+                    current[field] = val
+                else:
+                    current.pop(field, None)
+
+        PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+        PROVIDER_CONFIG_FILE.write_text(
+            json.dumps(current, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self.send_json(200, {"ok": True})
+
     def api_media(self, parsed_request, suffix):
         query = parse_qs(parsed_request.query)
         url = validate_media_url(query.get("url", [""])[0])
@@ -764,12 +945,34 @@ class DirectorHandler(SimpleHTTPRequestHandler):
     def api_prediction(self, parsed_request, prediction_id):
         if not PREDICTION_ID_RE.fullmatch(prediction_id):
             raise ApiError(400, "无效的任务 ID。")
+        provider_kind = self.headers.get("X-Provider-Kind", "").strip()
+        provider_name_id = self.headers.get("X-Provider-Name", "").strip()
+
+        # 同步供应商：提交时已把结果缓存到 SYNC_RESULTS，这里直接回放为「已完成」
+        if prediction_id.startswith("sync-"):
+            with SYNC_RESULTS_LOCK:
+                outputs = SYNC_RESULTS.pop(prediction_id, None)
+            if outputs is None:
+                raise ApiError(404, "同步任务结果已过期或不存在，请重新生成。")
+            for url in outputs:
+                try:
+                    register_prediction_outputs({"data": {"outputs": [url]}})
+                except ApiError:
+                    pass
+            self.send_json(200, {"data": {"id": prediction_id, "status": "succeeded", "outputs": outputs}})
+            return
+
+        kind = provider_kind if provider_kind in ("image", "video") else "image"
+        try:
+            adapter = providers.get_adapter(kind, provider_name_id or "atlascloud")
+        except providers.ProviderError as exc:
+            raise ApiError(exc.status, exc.message) from exc
+
         base_url = require_provider_base_url(
             {"base_url": self.headers.get("X-Provider-Base-Url", "")},
             "base_url",
-            ATLAS_MODEL_BASE_URL,
+            adapter.default_base_url or ATLAS_MODEL_BASE_URL,
         )
-        provider_kind = self.headers.get("X-Provider-Kind", "").strip()
         environment_name = {
             "image": "IMAGE_MODEL_API_KEY",
             "video": "VIDEO_MODEL_API_KEY",
@@ -777,12 +980,22 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         api_key = self.headers.get("X-Provider-Api-Key", "").strip() or os.environ.get(
             environment_name, ""
         ).strip() or os.environ.get("ATLASCLOUD_API_KEY", "").strip()
-        result = atlas_request(
-            f"prediction/{prediction_id}", base_url=base_url, api_key=api_key,
+        raw = atlas_request(
+            adapter.poll_path(prediction_id), base_url=base_url, api_key=api_key,
             provider_name="媒体模型供应商",
         )
-        register_prediction_outputs(result)
-        self.send_json(200, result)
+        normalized = adapter.normalize_poll(raw)
+        for url in normalized.get("outputs", []):
+            try:
+                register_prediction_outputs({"data": {"outputs": [url]}})
+            except ApiError:
+                pass
+        self.send_json(200, {"data": {
+            "id": prediction_id,
+            "status": normalized["status"],
+            "outputs": normalized.get("outputs", []),
+            "error": normalized.get("error"),
+        }})
 
     def generate_story(self, data):
         payload = build_story_payload(data)
@@ -837,21 +1050,77 @@ class DirectorHandler(SimpleHTTPRequestHandler):
             "version": APP_VERSION,
         })
 
+    def api_providers(self, parsed_request, suffix):
+        self.send_json(200, {"ok": True, "providers": providers.list_providers()})
+
+    def _select_adapter(self, kind, data):
+        try:
+            return providers.get_adapter(kind, data.get(f"{kind}_provider", "atlascloud"))
+        except providers.ProviderError as exc:
+            raise ApiError(exc.status, exc.message) from exc
+
     def generate_image(self, data):
-        base_url = require_provider_base_url(data, "image_base_url", ATLAS_MODEL_BASE_URL)
+        adapter = self._select_adapter("image", data)
+        base_url = require_provider_base_url(data, "image_base_url", adapter.default_base_url or ATLAS_MODEL_BASE_URL)
         api_key = provider_api_key(data, "image_api_key", "IMAGE_MODEL_API_KEY")
-        self.send_json(200, atlas_request(
-            "generateImage", "POST", build_image_payload(data), base_url, api_key,
-            provider_name="文生图供应商",
-        ))
+        try:
+            spec = adapter.submit_spec(validate_image_params(data))
+        except providers.ProviderError as exc:
+            raise ApiError(exc.status, exc.message) from exc
+        result = atlas_request(
+            spec["path"], spec["method"], spec["json"], base_url, api_key,
+            provider_name="文生图供应商", extra_headers=spec.get("extra_headers"),
+        )
+        self.send_json(200, self._submit_result(adapter, result, "image"))
 
     def generate_video(self, data):
-        base_url = require_provider_base_url(data, "video_base_url", ATLAS_MODEL_BASE_URL)
+        adapter = self._select_adapter("video", data)
+        base_url = require_provider_base_url(data, "video_base_url", adapter.default_base_url or ATLAS_MODEL_BASE_URL)
         api_key = provider_api_key(data, "video_api_key", "VIDEO_MODEL_API_KEY")
-        self.send_json(200, atlas_request(
-            "generateVideo", "POST", build_video_payload(data), base_url, api_key,
-            provider_name="图生视频供应商",
-        ))
+        try:
+            spec = adapter.submit_spec(validate_video_params(data))
+        except providers.ProviderError as exc:
+            raise ApiError(exc.status, exc.message) from exc
+        result = atlas_request(
+            spec["path"], spec["method"], spec["json"], base_url, api_key,
+            provider_name="图生视频供应商", read_timeout=120, extra_headers=spec.get("extra_headers"),
+        )
+        self.send_json(200, self._submit_result(adapter, result, "video"))
+
+    def _submit_result(self, adapter, result, kind):
+        """把各供应商的提交响应归一为 {data:{id}}。同步供应商把结果缓存供轮询回放。"""
+        try:
+            if adapter.synchronous:
+                outputs = adapter.read_outputs(result)
+                token = f"sync-{uuid.uuid4().hex}"
+                with SYNC_RESULTS_LOCK:
+                    SYNC_RESULTS[token] = outputs
+                    if len(SYNC_RESULTS) > 256:
+                        SYNC_RESULTS.pop(next(iter(SYNC_RESULTS)))
+                return {"data": {"id": token, "status": "succeeded", "outputs": outputs}}
+            return {"data": {"id": adapter.read_submit(result)}}
+        except providers.ProviderError as exc:
+            raise ApiError(exc.status, exc.message) from exc
+
+    def test_image_provider(self, data):
+        self._test_media_provider("image", data, "文生图供应商")
+
+    def test_video_provider(self, data):
+        self._test_media_provider("video", data, "图生视频供应商")
+
+    def _test_media_provider(self, kind, data, provider_name):
+        adapter = self._select_adapter(kind, data)
+        base_url = require_provider_base_url(data, f"{kind}_base_url", adapter.default_base_url or ATLAS_MODEL_BASE_URL)
+        env_name = "IMAGE_MODEL_API_KEY" if kind == "image" else "VIDEO_MODEL_API_KEY"
+        api_key = provider_api_key(data, f"{kind}_api_key", env_name)
+        status = provider_probe(base_url, api_key, adapter.probe_spec(), provider_name)
+        self.send_json(200, {
+            "ok": True,
+            "provider": adapter.name,
+            "label": adapter.label,
+            "probeStatus": status,
+            "version": APP_VERSION,
+        })
 
     def proxy_media(self, url, download, filename):
         response = media_request(url, self.headers.get("Range"))
@@ -966,39 +1235,63 @@ class DirectorHandler(SimpleHTTPRequestHandler):
         project = data.get("project")
         if isinstance(project, dict) and isinstance(project.get("meta"), dict) and project["meta"].get("mode") == "serial":
             raise ApiError(400, "AI 短剧不能导出互动试玩包，请使用分集成片导出。")
-        try:
+
+        def worker(handle):
+            handle.progress(8, "正在打包试玩素材…")
             result = build_player_package(project, ROOT, PROJECTS_DIR, PLAYER_DIR)
-        except (ValueError, FileNotFoundError) as exc:
-            raise ApiError(400, str(exc)) from exc
-        except OSError as exc:
-            raise ApiError(500, f"生成试玩包失败：{exc}") from exc
-        relative = result["path"].relative_to(PROJECTS_DIR).as_posix()
-        self.send_json(200, {
-            "ok": True,
-            "path": str(result["path"]),
-            "downloadUrl": f"/projects/{quote(relative, safe='/')}",
-            "warnings": result["warnings"],
-            "sceneCount": result["sceneCount"],
-            "assetCount": result["assetCount"],
-        })
+            relative = result["path"].relative_to(PROJECTS_DIR).as_posix()
+            return {
+                "ok": True,
+                "path": str(result["path"]),
+                "downloadUrl": f"/projects/{quote(relative, safe='/')}",
+                "warnings": result["warnings"],
+                "sceneCount": result["sceneCount"],
+                "assetCount": result["assetCount"],
+            }
+
+        job_id = JOBS.submit("export-player", worker)
+        self.send_json(202, {"ok": True, "jobId": job_id})
 
     def export_serial(self, data):
         project = data.get("project")
-        try:
-            result = build_serial_package(project, ROOT, PROJECTS_DIR, data.get("episode_id"))
-        except (ValueError, FileNotFoundError) as exc:
-            raise ApiError(400, str(exc)) from exc
-        except (OSError, RuntimeError) as exc:
-            raise ApiError(500, f"生成短剧分集成片失败：{exc}") from exc
-        relative = result["path"].relative_to(PROJECTS_DIR).as_posix()
-        self.send_json(200, {
-            "ok": True,
-            "path": str(result["path"]),
-            "downloadUrl": f"/projects/{quote(relative, safe='/')}",
-            "episodeCount": result["episodeCount"],
-            "episodeTitle": result.get("episodeTitle", ""),
-            "sceneCount": result["sceneCount"],
-        })
+        episode_id = data.get("episode_id")
+
+        def worker(handle):
+            try:
+                result = build_serial_package(
+                    project, ROOT, PROJECTS_DIR, episode_id,
+                    progress_cb=lambda value, message=None: handle.progress(value, message),
+                    cancel_check=lambda: handle.cancelled,
+                )
+            except serial_cancelled_error as exc:
+                raise JobCancelled() from exc
+            relative = result["path"].relative_to(PROJECTS_DIR).as_posix()
+            return {
+                "ok": True,
+                "path": str(result["path"]),
+                "downloadUrl": f"/projects/{quote(relative, safe='/')}",
+                "episodeCount": result["episodeCount"],
+                "episodeTitle": result.get("episodeTitle", ""),
+                "sceneCount": result["sceneCount"],
+            }
+
+        job_id = JOBS.submit("export-serial", worker)
+        self.send_json(202, {"ok": True, "jobId": job_id})
+
+    def api_job(self, parsed_request, job_id):
+        job_id = (job_id or "").strip("/").split("/")[0]
+        snapshot = JOBS.get(job_id)
+        if not snapshot:
+            raise ApiError(404, "任务不存在或已过期。")
+        self.send_json(200, snapshot)
+
+    def cancel_job(self, data):
+        job_id = str(data.get("jobId") or data.get("job_id") or "").strip()
+        if not job_id:
+            raise ApiError(400, "缺少任务 ID。")
+        if not JOBS.cancel(job_id):
+            raise ApiError(404, "任务不存在或已结束。")
+        self.send_json(200, {"ok": True})
 
     def delete_asset(self, data):
         kind = data.get("kind")
@@ -1099,6 +1392,173 @@ class DirectorHandler(SimpleHTTPRequestHandler):
             # Browsers routinely cancel an old Range request when seeking,
             # switching scenes, or reloading the video element.
             pass
+
+    # ── Agent 剧情对话助手（SSE 流式） ──────────────────────────────────────────
+
+    def agent_chat(self, data):
+        """POST /api/agent-chat
+        请求体：
+          {
+            "message":      用户消息（必填）
+            "history":      前端维护的多轮历史，格式同 OpenAI messages（可选）
+            "project":      当前项目 JSON 数据（可选，注入工具上下文）
+            "text_base_url": LLM base URL（复用项目设定）
+            "text_api_key":  LLM API key
+            "model":         模型 ID
+          }
+        响应：text/event-stream，每行 data: <JSON>
+        事件类型：text | tool_use | tool_result | done | error
+        """
+        user_msg = require_string(data, "message", 10000)
+        base_url = require_provider_base_url(data, "text_base_url", ATLAS_LLM_BASE_URL)
+        api_key = provider_api_key(data, "text_api_key", "TEXT_MODEL_API_KEY")
+        model = data.get("model", "deepseek-v3")
+        if not isinstance(model, str) or not model.strip():
+            model = "deepseek-v3"
+
+        project_data = data.get("project") or {}
+        history = data.get("history") or []
+
+        # 构建项目上下文 + 工具注册表
+        ctx = ProjectContext(project_data)
+        registry = ToolRegistry()
+        for tool in build_narrative_tools(ctx):
+            registry.register(tool)
+
+        # system prompt：详细告知项目数据结构与修改规范，防止 LLM 乱改字段
+        mode_label = "互动影游" if ctx.get_mode() == "interactive" else "AI 短剧"
+        summary = ctx.summary()
+        scenes = ctx.get_scenes()
+        scene_count = len(scenes)
+        start_id = next((s["id"] for s in scenes if s.get("isStart")), scenes[0]["id"] if scenes else "")
+
+        if ctx.get_mode() == "interactive":
+            mode_spec = """
+【互动影游模式 — 数据结构规范】
+• 每个节点（scene）是剧情树上的一个分支节点，字段说明：
+  - id            唯一标识，禁止修改
+  - title         节点标题（简短，≤20字）
+  - shot          镜头描述（英文，供 AI 生图用）
+  - action        动作表演描述（中文，描述当前镜头可见行为）
+  - dialogue      台词/旁白（当前镜头实际说出的内容）
+  - entryState    入场状态（人物/环境进入镜头时的状态描述）
+  - exitState     离场状态（人物/环境离开镜头时的状态描述）
+  - transition    转场类型：只能是 match / dissolve / cut / fade
+  - imagePrompt   关键帧生图提示词（英文）
+  - videoPrompt   视频生成提示词（英文）
+  - nextSceneId   线性后继节点 id（没有分支时有效）
+  - choices       分支选项列表，每项含：
+      text          选项文字（呈现给玩家的选择）
+      targetSceneId 选择后跳转的节点 id（必须是已有 id，禁止伪造）
+      effect        选择效果描述（可选）
+  - isStart       是否起始节点（只有一个，禁止修改）
+
+• 修改规范（必须严格遵守）：
+  1. 禁止修改 id、isStart、order 字段
+  2. choices[].targetSceneId 必须指向已存在的节点 id，禁止填不存在的 id
+  3. nextSceneId 如需修改，也必须指向已存在的节点 id 或空字符串
+  4. transition 只能是 match / dissolve / cut / fade 四个值之一
+  5. 修改前必须先调用 get_project_summary 了解所有节点 id，再调用 get_scene_detail 读取完整字段，最后才调用 update_scene 提交 patch
+  6. update_scene 的 patch 只包含实际要修改的字段，不要提交未变更的字段
+  7. 不要一次性修改超过 3 个节点，逐一确认后再继续
+"""
+        else:
+            mode_spec = """
+【AI 短剧模式 — 数据结构规范】
+• 每个节点（scene）是线性镜头序列中的一个镜头，字段说明：
+  - id            唯一标识，禁止修改
+  - title         镜头标题
+  - shot          镜头描述
+  - action        动作表演（当前镜头可见行为，不能跨镜头总结）
+  - dialogue      台词/旁白（按时长限制：4s≤7字、8s≤19字）
+  - entryState    入场状态
+  - exitState     离场状态（必须能接续下一镜头的 entryState）
+  - transition    转场：match / dissolve / cut / fade
+  - imagePrompt   关键帧提示词（英文）
+  - videoPrompt   视频提示词（英文）
+  - nextSceneId   下一个镜头 id（线性顺序）
+
+• 修改规范：
+  1. 禁止修改 id、order、episodeOrder 字段
+  2. exitState 与下一镜头 entryState 须保持连续
+  3. 修改前先 get_project_summary → get_scene_detail → update_scene
+  4. patch 只包含实际修改的字段
+"""
+
+        system_prompt = f"""你是《{summary.get('title', '当前项目')}》的专属 AI 编剧助手。
+项目类型：{mode_label}
+项目简介：{summary.get('synopsis', '（未填写）')}
+当前共 {scene_count} 个节点，起始节点 id：{start_id}
+
+你的职责：帮助创作者修改剧情、优化台词、建议分支走向、检查逻辑连贯性。
+回复语言：中文，语气专业而亲切，支持 Markdown 格式。
+{mode_spec}
+【工作流程（每次修改必须遵守）】
+1. 如果不清楚项目结构，先调用 get_project_summary 获取全部节点概览
+2. 要修改某个节点前，先调用 get_scene_detail 读取完整字段
+3. 然后调用 update_scene 提交 patch（只含变更字段）
+4. 每次 update_scene 调用后，向用户说明修改了什么、为什么
+5. update_scene 只是生成建议，用户点击"应用修改"按钮才会真正写入项目
+
+【禁止行为】
+- 禁止编造不存在的节点 id
+- 禁止在 targetSceneId / nextSceneId 中填写不存在的 id
+- 禁止删除或重命名 id 字段
+- 禁止一次性批量修改超过 3 个节点（先改先确认）
+"""
+
+        conversation = AgentConversation(system_prompt=system_prompt)
+
+        # 注入历史多轮消息（前端传来的，跳过 system 角色）
+        for msg in history:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user" and content:
+                conversation.add_user_message(str(content))
+            elif role == "assistant" and content:
+                conversation.add_assistant_message(str(content))
+
+        # 添加本轮用户消息
+        conversation.add_user_message(user_msg)
+
+        # 构建 Agent
+        client = OpenAICompatClient(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            max_tokens=4096,
+            temperature=0.8,
+            timeout=300,
+        )
+        agent = Agent(client=client, registry=registry, max_turns=10)
+
+        # 以 SSE 流式写出事件
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+
+        def sse(event_dict):
+            line = "data: " + json.dumps(event_dict, ensure_ascii=False) + "\n\n"
+            self.wfile.write(line.encode("utf-8"))
+            self.wfile.flush()
+
+        try:
+            for event in agent.run(conversation):
+                sse(event)
+                if event.get("type") in ("done", "error"):
+                    break
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        except Exception as exc:
+            try:
+                sse({"type": "error", "message": f"Agent 运行异常: {type(exc).__name__}: {exc}"})
+            except Exception:
+                pass
 
     def serve_static(self, path, head_only=False):
         relative = "index.html" if path == "/" else path.lstrip("/")

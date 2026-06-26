@@ -117,22 +117,39 @@
           <strong>文本模型</strong><small>OpenAI Chat Completions 兼容</small>
           <label>API 根地址<input id="projectTextBaseUrl" value="https://api.atlascloud.ai/v1" maxlength="1000" spellcheck="false"></label>
           <label>模型 ID<input id="projectTextModel" value="deepseek-v3" maxlength="200" spellcheck="false"></label>
-          <label>API Key（仅本次会话）<input id="projectTextApiKey" type="password" maxlength="2000" autocomplete="off" placeholder="留空使用 TEXT_MODEL_API_KEY 或 ATLASCLOUD_API_KEY"></label>
+          <label>API Key（保存在本机）<input id="projectTextApiKey" type="password" maxlength="2000" autocomplete="off" placeholder="留空使用服务器环境变量 TEXT_MODEL_API_KEY"></label>
           <button id="testTextProviderBtn" class="button ghost wide provider-test">测试文本模型连接</button>
         </section>
         <section class="provider-settings">
-          <strong>文生图模型</strong><small>AtlasCloud 异步生成协议兼容</small>
+          <strong>文生图模型</strong><small>支持 AtlasCloud / OpenAI 兼容 / 通义万相</small>
+          <label>供应商
+            <select id="projectImageProvider">
+              <option value="atlascloud">AtlasCloud（异步协议）</option>
+              <option value="openai">OpenAI 兼容图像</option>
+              <option value="dashscope">阿里通义万相</option>
+            </select>
+          </label>
           <label>API 根地址<input id="projectImageBaseUrl" value="https://api.atlascloud.ai/api/v1/model" maxlength="1000" spellcheck="false"></label>
           <label>模型 ID<input id="projectImageModel" value="openai/gpt-image-2/text-to-image" maxlength="200" spellcheck="false"></label>
           <label>参考图编辑模型（可选）<input id="projectImageEditModel" value="openai/gpt-image-2/edit" maxlength="200" spellcheck="false"></label>
-          <label>API Key（仅本次会话）<input id="projectImageApiKey" type="password" maxlength="2000" autocomplete="off" placeholder="留空使用 IMAGE_MODEL_API_KEY 或 ATLASCLOUD_API_KEY"></label>
+          <label>API Key（保存在本机）<input id="projectImageApiKey" type="password" maxlength="2000" autocomplete="off" placeholder="留空使用服务器环境变量 IMAGE_MODEL_API_KEY"></label>
+          <button id="testImageProviderBtn" class="button ghost wide provider-test">测试文生图连接</button>
         </section>
         <section class="provider-settings">
-          <strong>图生视频模型</strong><small>AtlasCloud 异步生成协议兼容</small>
+          <strong>图生视频模型</strong><small>支持 AtlasCloud / 火山方舟 Seedance / 通义万相</small>
+          <label>供应商
+            <select id="projectVideoProvider">
+              <option value="atlascloud">AtlasCloud（异步协议）</option>
+              <option value="seedance">火山方舟 Seedance</option>
+              <option value="dashscope">阿里通义万相</option>
+            </select>
+          </label>
           <label>API 根地址<input id="projectVideoBaseUrl" value="https://api.atlascloud.ai/api/v1/model" maxlength="1000" spellcheck="false"></label>
           <label>模型 ID<input id="projectVideoModel" value="xai/grok-imagine-video-v1.5/image-to-video" maxlength="200" spellcheck="false"></label>
-          <label>API Key（仅本次会话）<input id="projectVideoApiKey" type="password" maxlength="2000" autocomplete="off" placeholder="留空使用 VIDEO_MODEL_API_KEY 或 ATLASCLOUD_API_KEY"></label>
+          <label>API Key（保存在本机）<input id="projectVideoApiKey" type="password" maxlength="2000" autocomplete="off" placeholder="留空使用服务器环境变量 VIDEO_MODEL_API_KEY"></label>
+          <button id="testVideoProviderBtn" class="button ghost wide provider-test">测试图生视频连接</button>
         </section>
+        <button id="saveProviderConfigBtn" class="button primary wide" style="margin-top:6px">保存供应商设置</button>
       </details>
       <button id="draftBtn" class="button primary wide">使用文本模型生成</button>
       <button id="localDraftBtn" class="button ghost wide secondary-draft">使用本地模板生成</button>
@@ -249,6 +266,8 @@
         <div><small id="treeBrowserMode">剧情结构</small><strong id="treeBrowserTitle">剧情树</strong></div>
         <div class="tree-tools">
           <span id="treeStats"></span>
+          <button id="treeToggleShotsBtn" class="button ghost" title="展开/合并同一剧情节点的多个分镜" hidden>展开分镜</button>
+          <button id="treeResetLayoutBtn" class="button ghost" title="恢复自动布局">重置布局</button>
           <button id="treeZoomOutBtn" class="button ghost">−</button>
           <button id="treeZoomResetBtn" class="button ghost">100%</button>
           <button id="treeZoomInBtn" class="button ghost">＋</button>
@@ -262,12 +281,33 @@
           <div id="treeNodes" class="tree-nodes"></div>
         </div>
       </div>
+      <aside id="treeDetail" class="tree-detail" hidden>
+        <header class="tree-detail-header">
+          <div><small id="treeDetailTag">镜头详情</small><strong id="treeDetailTitle"></strong></div>
+          <button id="treeDetailCloseBtn" class="icon-button" aria-label="关闭详情">×</button>
+        </header>
+        <div id="treeDetailShots" class="tree-detail-shots" hidden></div>
+        <div id="treeDetailStage" class="tree-detail-stage"></div>
+        <div class="tree-detail-nav" id="treeDetailNav" hidden>
+          <button id="treeDetailPrevBtn" class="button ghost">‹ 上一分镜</button>
+          <span id="treeDetailShotPos"></span>
+          <button id="treeDetailPlayAllBtn" class="button ghost">▶ 连续播放</button>
+          <button id="treeDetailNextBtn" class="button ghost">下一分镜 ›</button>
+        </div>
+        <div class="tree-detail-body">
+          <div class="tree-detail-field"><span>剧情与表演</span><p id="treeDetailAction"></p></div>
+          <div class="tree-detail-field" id="treeDetailDialogueWrap"><span>对白 / 旁白</span><blockquote id="treeDetailDialogue"></blockquote></div>
+        </div>
+        <footer class="tree-detail-actions">
+          <button id="treeDetailEditBtn" class="button primary wide">在编辑器中打开此镜头</button>
+        </footer>
+      </aside>
       <footer class="tree-legend">
         <span id="legendInteractive"><i class="legend-start"></i>起点</span>
         <span id="legendChoice"><i class="legend-choice"></i>分支节点</span>
         <span id="legendEnding"><i class="legend-ending"></i>结局</span>
         <span id="legendSerial" hidden><i class="legend-serial"></i>短剧镜头</span>
-        <span>单击节点定位，双击返回编辑器</span>
+        <span>拖动节点自由摆放，单击查看剧情与视频，双击返回编辑器</span>
         <span class="tree-legend-hint" id="treePanHint">· 拖拽空白区域平移视图</span>
       </footer>
     </section>
@@ -333,9 +373,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="/feature-registry.js?v=17"></script>
-  <script src="/episode-model.js?v=17"></script>
-  <script src="/app.js?v=25"></script>
-  <script src="/publish-feature.js?v=18"></script>
+  <script src="/dist/bundle.js?v=36"></script>
 </body>
 </html>

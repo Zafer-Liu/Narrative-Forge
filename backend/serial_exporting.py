@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import time
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -9,6 +10,10 @@ from .publishing import release_name
 
 
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".m4v"}
+
+
+class _ExportCancelled(Exception):
+    """导出过程中检测到取消请求时抛出。"""
 
 
 def _project_video_from_url(local_url, root, projects_dir):
@@ -35,6 +40,33 @@ def _find_scene_video(scene, root, projects_dir, project_dir):
         if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS and not path.name.endswith(".part")
     )
     return candidates[0] if candidates else None
+
+
+def _run_ffmpeg(command, timeout, cancel_check=None):
+    """运行 ffmpeg；支持协作式取消（轮询 cancel_check，命中则 kill 进程）。
+
+    返回 (returncode, combined_output)。取消时抛 _ExportCancelled。
+    """
+    cancel_check = cancel_check or _noop_cancel
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            output, _ = process.communicate(timeout=0.5)
+            return process.returncode, output or ""
+        except subprocess.TimeoutExpired:
+            if cancel_check():
+                process.kill()
+                process.communicate()
+                raise _ExportCancelled()
+            if time.monotonic() > deadline:
+                process.kill()
+                process.communicate()
+                raise RuntimeError("ffmpeg 执行超时。")
 
 
 def _probe_video(ffmpeg, video):
@@ -70,7 +102,7 @@ def _transition_duration(value, clip_duration):
     return max(0.0, min(duration, clip_duration / 4))
 
 
-def _normalize_clip(ffmpeg, source, target, info, width, height, fade_in=0.0, fade_out=0.0):
+def _normalize_clip(ffmpeg, source, target, info, width, height, fade_in=0.0, fade_out=0.0, cancel_check=None):
     command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source)]
     audio_input = "0:a:0"
     if not info["has_audio"]:
@@ -94,15 +126,14 @@ def _normalize_clip(ffmpeg, source, target, info, width, height, fade_in=0.0, fa
         "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-c:a", "aac", "-b:a", "192k",
         str(target),
     ])
-    completed = subprocess.run(
-        command, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=30 * 60, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if completed.returncode != 0 or not target.is_file():
-        raise RuntimeError(f"镜头标准化失败：{(completed.stderr or completed.stdout or '').strip()[-1200:]}")
+    returncode, output = _run_ffmpeg(command, timeout=30 * 60, cancel_check=cancel_check)
+    if returncode != 0 or not target.is_file():
+        raise RuntimeError(f"镜头标准化失败：{(output or '').strip()[-1200:]}")
 
 
-def _concat_episode(ffmpeg, videos, target, working_dir, transitions=None):
+def _concat_episode(ffmpeg, videos, target, working_dir, transitions=None, progress_cb=None, cancel_check=None):
+    progress_cb = progress_cb or _noop_progress
+    cancel_check = cancel_check or _noop_cancel
     temporary = target.with_name(f".{target.stem}.part.mp4")
     normalize_dir = working_dir / f".{target.stem}-segments"
     list_file = working_dir / f".{target.stem}-concat.txt"
@@ -115,13 +146,21 @@ def _concat_episode(ffmpeg, videos, target, working_dir, transitions=None):
         height = max(2, infos[0]["height"] // 2 * 2)
         normalized = []
         transitions = transitions or []
+        clip_total = len(videos)
         for index, (video, info) in enumerate(zip(videos, infos)):
+            if cancel_check():
+                raise _ExportCancelled()
+            # 标准化各镜头占该集进度的 0–85%，留出尾部拼接
+            progress_cb(int(index / max(1, clip_total) * 85), f"标准化镜头 {index + 1}/{clip_total}…")
             segment = normalize_dir / f"segment-{index:03d}.mp4"
             fade_in = _transition_duration(transitions[index] if index < len(transitions) else "match", info["duration"])
             next_transition = transitions[index + 1] if index + 1 < len(transitions) else "cut"
             fade_out = _transition_duration(next_transition, info["duration"])
-            _normalize_clip(ffmpeg, video, segment, info, width, height, fade_in, fade_out)
+            _normalize_clip(ffmpeg, video, segment, info, width, height, fade_in, fade_out, cancel_check=cancel_check)
             normalized.append(segment)
+        if cancel_check():
+            raise _ExportCancelled()
+        progress_cb(88, "合并镜头为成片…")
         list_file.write_text("".join(f"file '{segment.resolve().as_posix()}'\n" for segment in normalized), encoding="utf-8")
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts",
@@ -129,14 +168,11 @@ def _concat_episode(ffmpeg, videos, target, working_dir, transitions=None):
             "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart", str(temporary),
         ]
-        completed = subprocess.run(
-            command, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=60 * 60, check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if completed.returncode != 0 or not temporary.is_file():
-            details = (completed.stderr or completed.stdout or "未知 ffmpeg 错误").strip()[-1600:]
+        returncode, output = _run_ffmpeg(command, timeout=60 * 60, cancel_check=cancel_check)
+        if returncode != 0 or not temporary.is_file():
+            details = (output or "未知 ffmpeg 错误").strip()[-1600:]
             raise RuntimeError(f"ffmpeg 拼接失败：{details}")
+        progress_cb(100, "本集完成")
         temporary.replace(target)
     finally:
         list_file.unlink(missing_ok=True)
@@ -144,7 +180,17 @@ def _concat_episode(ffmpeg, videos, target, working_dir, transitions=None):
         temporary.unlink(missing_ok=True)
 
 
-def build_serial_package(project, root, projects_dir, episode_id=None):
+def _noop_progress(_value, _message=None):
+    pass
+
+
+def _noop_cancel():
+    return False
+
+
+def build_serial_package(project, root, projects_dir, episode_id=None, progress_cb=None, cancel_check=None):
+    progress_cb = progress_cb or _noop_progress
+    cancel_check = cancel_check or _noop_cancel
     if not isinstance(project, dict):
         raise ValueError("无效的短剧项目数据。")
     meta = project.get("meta") if isinstance(project.get("meta"), dict) else {}
@@ -171,7 +217,11 @@ def build_serial_package(project, root, projects_dir, episode_id=None):
     total_scenes = 0
 
     episode_titles = []
-    for episode_index, episode in indexed_episodes:
+    episode_total = len(indexed_episodes)
+    progress_cb(2, "准备导出…")
+    for done, (episode_index, episode) in enumerate(indexed_episodes):
+        if cancel_check():
+            raise _ExportCancelled()
         episode_meta = episode.get("meta") if isinstance(episode.get("meta"), dict) else {}
         scenes = episode.get("scenes") if isinstance(episode.get("scenes"), list) else []
         scenes = sorted((item for item in scenes if isinstance(item, dict)), key=lambda item: int(item.get("episodeOrder", item.get("order", 0))))
@@ -190,12 +240,22 @@ def build_serial_package(project, root, projects_dir, episode_id=None):
         episode_title = release_name(episode_meta.get("title"), f"第{episode_index:02d}集")
         target = export_dir / f"{release_name(title)}-第{episode_index:02d}集-{episode_title}.mp4"
         transitions = [str(scene.get("transition") or ("cut" if index == 0 else "match")) for index, scene in enumerate(scenes)]
-        _concat_episode(ffmpeg, videos, target, export_dir, transitions)
+        # 把单集内的拼接进度映射到该集占用的整体进度区间
+        span_lo = 5 + int(done / episode_total * 85)
+        span_hi = 5 + int((done + 1) / episode_total * 85)
+
+        def episode_progress(value, message=None, _lo=span_lo, _hi=span_hi, _idx=episode_index):
+            pct = _lo + (max(0, min(100, value or 0)) / 100) * (_hi - _lo)
+            progress_cb(int(pct), message or f"正在拼接第{_idx}集…")
+
+        _concat_episode(ffmpeg, videos, target, export_dir, transitions,
+                        progress_cb=episode_progress, cancel_check=cancel_check)
         episode_outputs.append(target)
         episode_titles.append(str(episode_meta.get("title") or f"第{episode_index}集"))
         total_scenes += len(scenes)
 
     if episode_id:
+        progress_cb(100, "完成")
         return {
             "path": episode_outputs[0],
             "episodes": episode_outputs,
@@ -204,6 +264,7 @@ def build_serial_package(project, root, projects_dir, episode_id=None):
             "sceneCount": total_scenes,
         }
 
+    progress_cb(92, "正在打包分集压缩包…")
     package = export_dir / f"{release_name(title)}-分集成片.zip"
     temporary_zip = package.with_suffix(package.suffix + ".part")
     try:
@@ -214,6 +275,7 @@ def build_serial_package(project, root, projects_dir, episode_id=None):
     finally:
         temporary_zip.unlink(missing_ok=True)
 
+    progress_cb(100, "完成")
     return {
         "path": package,
         "episodes": episode_outputs,

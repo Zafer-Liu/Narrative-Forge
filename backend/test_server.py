@@ -3,6 +3,7 @@ import sys
 import json
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 import urllib.error
@@ -50,7 +51,7 @@ class ServerValidationTests(unittest.TestCase):
                 asset_dir = projects / "短剧测试" / "assets" / scene_id
                 asset_dir.mkdir(parents=True)
                 (asset_dir / "video.mp4").write_bytes(b"video")
-            concat_episode.side_effect = lambda _ffmpeg, _videos, target, _working, _transitions=None: target.write_bytes(b"episode")
+            concat_episode.side_effect = lambda _ffmpeg, _videos, target, _working, _transitions=None, **_kwargs: target.write_bytes(b"episode")
             project = {
                 "meta": {"title": "短剧测试", "mode": "serial"},
                 "episodes": [
@@ -74,7 +75,7 @@ class ServerValidationTests(unittest.TestCase):
             asset_dir = projects / "逐集导出" / "assets" / "s1"
             asset_dir.mkdir(parents=True)
             (asset_dir / "video.mp4").write_bytes(b"video")
-            concat_episode.side_effect = lambda _ffmpeg, _videos, target, _working, _transitions=None: target.write_bytes(b"episode")
+            concat_episode.side_effect = lambda _ffmpeg, _videos, target, _working, _transitions=None, **_kwargs: target.write_bytes(b"episode")
             project = {
                 "meta": {"title": "逐集导出", "mode": "serial"},
                 "episodes": [
@@ -359,6 +360,176 @@ class ServerValidationTests(unittest.TestCase):
         sleep.assert_not_called()
 
 
+class ProviderAdapterTests(unittest.TestCase):
+    def test_get_adapter_unknown_raises(self):
+        from backend import providers
+        with self.assertRaises(providers.ProviderError):
+            providers.get_adapter("image", "nonexistent")
+
+    def test_atlascloud_image_submit_and_poll_normalize(self):
+        from backend import providers
+        adapter = providers.get_adapter("image", "atlascloud")
+        spec = adapter.submit_spec({
+            "model": "m", "prompt": "p", "quality": "high", "size": "1536x1024",
+            "output_format": "jpeg", "moderation": "low", "reference_image": "",
+        })
+        self.assertEqual(spec["path"], "generateImage")
+        self.assertEqual(adapter.read_submit({"data": {"id": "job-1"}}), "job-1")
+        normalized = adapter.normalize_poll({"data": {"status": "completed", "outputs": ["https://x/y.jpg"]}})
+        self.assertEqual(normalized["status"], "succeeded")
+        self.assertEqual(normalized["outputs"], ["https://x/y.jpg"])
+
+    def test_openai_image_is_synchronous_and_reads_url(self):
+        from backend import providers
+        adapter = providers.get_adapter("image", "openai")
+        self.assertTrue(adapter.synchronous)
+        spec = adapter.submit_spec({"model": "dall-e-3", "prompt": "p", "size": "1024x1536"})
+        self.assertEqual(spec["path"], "images/generations")
+        self.assertEqual(spec["json"]["size"], "1024x1792")  # portrait 映射
+        urls = adapter.read_outputs({"data": [{"url": "https://img/a.png"}]})
+        self.assertEqual(urls, ["https://img/a.png"])
+
+    def test_openai_image_rejects_b64_only(self):
+        from backend import providers
+        adapter = providers.get_adapter("image", "openai")
+        with self.assertRaises(providers.ProviderError):
+            adapter.read_outputs({"data": [{"b64_json": "AAAA"}]})
+
+    def test_dashscope_image_async_headers_and_poll(self):
+        from backend import providers
+        adapter = providers.get_adapter("image", "dashscope")
+        spec = adapter.submit_spec({"model": "wan2.2-t2i-flash", "prompt": "p", "size": "1536x1024"})
+        self.assertEqual(spec["extra_headers"].get("X-DashScope-Async"), "enable")
+        self.assertEqual(adapter.read_submit({"output": {"task_id": "t-1"}}), "t-1")
+        normalized = adapter.normalize_poll({"output": {"task_status": "SUCCEEDED", "results": [{"url": "https://d/x.png"}]}})
+        self.assertEqual(normalized["status"], "succeeded")
+        self.assertEqual(normalized["outputs"], ["https://d/x.png"])
+
+    def test_seedance_video_submit_and_poll(self):
+        from backend import providers
+        adapter = providers.get_adapter("video", "seedance")
+        spec = adapter.submit_spec({
+            "model": "doubao-seedance-1-0-pro-250528", "prompt": "p",
+            "image_url": "https://i/start.jpg", "duration": 5, "resolution": "720p", "aspect_ratio": "16:9",
+        })
+        self.assertEqual(spec["path"], "contents/generations/tasks")
+        self.assertEqual(spec["json"]["content"][0]["type"], "text")
+        self.assertEqual(adapter.read_submit({"id": "cgt-1"}), "cgt-1")
+        normalized = adapter.normalize_poll({"status": "succeeded", "content": {"video_url": "https://v/o.mp4"}})
+        self.assertEqual(normalized["status"], "succeeded")
+        self.assertEqual(normalized["outputs"], ["https://v/o.mp4"])
+
+    def test_dashscope_video_poll_reads_video_url(self):
+        from backend import providers
+        adapter = providers.get_adapter("video", "dashscope")
+        normalized = adapter.normalize_poll({"output": {"task_status": "FAILED", "message": "boom"}})
+        self.assertEqual(normalized["status"], "failed")
+        self.assertEqual(normalized["error"], "boom")
+
+    def test_list_providers_shape(self):
+        from backend import providers
+        listing = providers.list_providers()
+        self.assertIn("image", listing)
+        self.assertIn("video", listing)
+        names_image = {p["name"] for p in listing["image"]}
+        self.assertEqual(names_image, {"atlascloud", "openai", "dashscope"})
+        names_video = {p["name"] for p in listing["video"]}
+        self.assertEqual(names_video, {"atlascloud", "seedance", "dashscope"})
+
+
+class ProviderProbeTests(unittest.TestCase):
+    @patch("server.requests.request")
+    def test_probe_treats_404_as_reachable(self, request):
+        response = request.return_value
+        response.status_code = 404
+        with patch.dict(os.environ, {"ATLASCLOUD_API_KEY": "k"}, clear=True):
+            status = server.provider_probe(
+                "https://api.x.ai/v1", "k",
+                {"method": "GET", "path": "models", "json": None, "extra_headers": {}},
+                "测试供应商",
+            )
+        self.assertEqual(status, 404)
+
+    @patch("server.requests.request")
+    def test_probe_401_is_auth_failure(self, request):
+        response = request.return_value
+        response.status_code = 401
+        with patch.dict(os.environ, {"ATLASCLOUD_API_KEY": "k"}, clear=True):
+            with self.assertRaises(server.ApiError) as ctx:
+                server.provider_probe(
+                    "https://api.x.ai/v1", "k",
+                    {"method": "GET", "path": "models", "json": None, "extra_headers": {}},
+                    "测试供应商",
+                )
+        self.assertEqual(ctx.exception.status, 401)
+        self.assertEqual(ctx.exception.details["reason"], "auth_failed")
+
+    def test_probe_requires_api_key(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(server.ApiError) as ctx:
+                server.provider_probe("https://api.x.ai/v1", "", {"path": "models"}, "测试供应商")
+        self.assertEqual(ctx.exception.status, 503)
+
+
+class JobManagerTests(unittest.TestCase):
+    def test_submit_completes_with_result_and_progress(self):
+        from backend.jobs import JobManager
+        manager = JobManager(max_workers=2)
+
+        def worker(handle):
+            handle.progress(50, "一半了")
+            return {"value": 42}
+
+        job_id = manager.submit("test", worker)
+        snapshot = self._wait(manager, job_id)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["result"], {"value": 42})
+        self.assertEqual(snapshot["progress"], 100)
+
+    def test_failure_is_captured(self):
+        from backend.jobs import JobManager
+        manager = JobManager()
+
+        def worker(_handle):
+            raise ValueError("出错了")
+
+        job_id = manager.submit("test", worker)
+        snapshot = self._wait(manager, job_id)
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertIn("出错了", snapshot["error"])
+
+    def test_cancel_is_observed_by_worker(self):
+        from backend.jobs import JobManager, JobCancelled
+        manager = JobManager()
+        started = threading.Event()
+
+        def worker(handle):
+            started.set()
+            for _ in range(200):
+                handle.raise_if_cancelled()
+                time.sleep(0.02)
+            return "done"
+
+        job_id = manager.submit("test", worker)
+        self.assertTrue(started.wait(2))
+        self.assertTrue(manager.cancel(job_id))
+        snapshot = self._wait(manager, job_id)
+        self.assertEqual(snapshot["status"], "cancelled")
+
+    def test_get_unknown_returns_none(self):
+        from backend.jobs import JobManager
+        self.assertIsNone(JobManager().get("nope"))
+
+    def _wait(self, manager, job_id, timeout=5):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            snapshot = manager.get(job_id)
+            if snapshot and snapshot["status"] in ("completed", "failed", "cancelled"):
+                return snapshot
+            time.sleep(0.02)
+        raise AssertionError("任务超时")
+
+
 class ServerIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -382,10 +553,7 @@ class ServerIntegrationTests(unittest.TestCase):
     def test_serves_workbench_assets(self):
         for path, marker in (
             ("/", "导出试玩包".encode("utf-8")),
-            ("/app.js", b"workbench-core"),
-            ("/feature-registry.js", b"FrameForgeFeatures"),
-            ("/episode-model.js", b"FrameForgeEpisodeModel"),
-            ("/publish-feature.js", b"player-package-export"),
+            ("/dist/bundle.js", b"FrameForgeApp"),
             ("/style.css", b".tree-node"),
             ("/logo.png", b"\x89PNG\r\n\x1a\n"),
         ):
@@ -394,6 +562,59 @@ class ServerIntegrationTests(unittest.TestCase):
                     content = response.read()
                 self.assertEqual(response.status, 200)
                 self.assertIn(marker, content)
+
+    def test_providers_endpoint_lists_adapters(self):
+        with urllib.request.urlopen(f"{self.base_url}/api/providers") as response:
+            payload = json.load(response)
+        self.assertTrue(payload["ok"])
+        self.assertIn("atlascloud", {p["name"] for p in payload["providers"]["image"]})
+        self.assertIn("seedance", {p["name"] for p in payload["providers"]["video"]})
+
+    @patch("server.requests.request")
+    def test_test_image_provider_probe_ok(self, request):
+        response = request.return_value
+        response.status_code = 200
+        body = json.dumps({
+            "image_base_url": "https://api.openai.com/v1",
+            "image_api_key": "sk-test",
+            "image_provider": "openai",
+            "image_model": "dall-e-3",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/api/test-image-provider", data=body,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            payload = json.load(resp)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["provider"], "openai")
+
+    @patch("server.requests.request")
+    def test_generate_image_routes_through_openai_adapter(self, request):
+        response = request.return_value
+        response.ok = True
+        response.json.return_value = {"data": [{"url": "https://img.example.com/a.png"}]}
+        body = json.dumps({
+            "image_provider": "openai",
+            "image_base_url": "https://api.openai.com/v1",
+            "image_api_key": "sk-test",
+            "image_model": "dall-e-3",
+            "prompt": "a cat",
+            "size": "1024x1024",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/api/generate-image", data=body,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            payload = json.load(resp)
+        # 同步供应商：直接返回带 outputs 的已完成结果，id 以 sync- 开头
+        self.assertTrue(payload["data"]["id"].startswith("sync-"))
+        self.assertEqual(payload["data"]["status"], "succeeded")
+        self.assertEqual(payload["data"]["outputs"], ["https://img.example.com/a.png"])
+        # 确认请求确实打到了 OpenAI 兼容路径
+        called_url = request.call_args.args[1] if len(request.call_args.args) > 1 else request.call_args.kwargs.get("url", "")
+        self.assertIn("images/generations", called_url)
 
     @patch("server.requests.get")
     def test_media_proxy_serves_atlascloud_asset(self, get):
@@ -458,6 +679,16 @@ class ServerIntegrationTests(unittest.TestCase):
             self.assertEqual(payload["localUrl"], "/projects/星海回声/assets/scene-1/image.jpg")
             self.assertEqual(Path(payload["path"]), image)
 
+    def _poll_job(self, job_id, timeout=15):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with urllib.request.urlopen(f"{self.base_url}/api/jobs/{job_id}") as response:
+                snapshot = json.load(response)
+            if snapshot["status"] in ("completed", "failed", "cancelled"):
+                return snapshot
+            time.sleep(0.1)
+        raise AssertionError(f"任务 {job_id} 超时未结束")
+
     def test_export_player_builds_offline_zip_without_provider_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -486,7 +717,10 @@ class ServerIntegrationTests(unittest.TestCase):
             )
             with patch("server.PROJECTS_DIR", root):
                 with urllib.request.urlopen(request) as response:
-                    payload = json.load(response)
+                    accepted = json.load(response)
+                snapshot = self._poll_job(accepted["jobId"])
+            self.assertEqual(snapshot["status"], "completed", snapshot.get("error"))
+            payload = snapshot["result"]
             package = Path(payload["path"])
             self.assertTrue(package.is_file())
             self.assertEqual(payload["sceneCount"], 1)
@@ -544,7 +778,10 @@ class ServerIntegrationTests(unittest.TestCase):
             )
             with patch("server.PROJECTS_DIR", projects):
                 with urllib.request.urlopen(request) as response:
-                    payload = json.load(response)
+                    accepted = json.load(response)
+                snapshot = self._poll_job(accepted["jobId"])
+            self.assertEqual(snapshot["status"], "completed", snapshot.get("error"))
+            payload = snapshot["result"]
             self.assertEqual(payload["episodeCount"], 2)
             self.assertEqual(payload["sceneCount"], 18)
             self.assertIn("/projects/", payload["downloadUrl"])

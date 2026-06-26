@@ -29,7 +29,9 @@ button { cursor: pointer; }
 .status-pill.ready { color: var(--success); border-color: rgba(90,195,154,.35); }
 .status-pill.warning { color: var(--accent); border-color: rgba(233,180,91,.35); }
 
-.workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 330px) minmax(270px, 310px) minmax(520px, 1fr); gap: 1px; background: var(--line); }
+.workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 330px) minmax(270px, 310px) minmax(520px, 1fr); gap: 1px; background: var(--line); transition: margin-right .25s cubic-bezier(.4,0,.2,1); }
+/* Agent 面板放大时，主内容区右移 480px，让出空间 */
+body.agent-expanded .workspace { margin-right: 480px; }
 .panel { min-height: 0; overflow-y: auto; background: rgba(17,21,27,.97); padding: 22px; }
 .panel-title { display: flex; gap: 10px; align-items: center; margin-bottom: 22px; }
 .panel-title span { color: var(--accent); font: 700 11px/1 monospace; }
@@ -104,7 +106,8 @@ input:focus, textarea:focus, select:focus { border-color: #8c744a; box-shadow: 0
 .scene-item:active { cursor: grabbing; }
 .scene-item:hover { transform: translateX(2px); border-color: #3b4553; }
 .scene-item.active { border-color: var(--accent); background: linear-gradient(100deg, rgba(233,180,91,.10), #0d1117 68%); }
-.scene-item.dragging, .tree-node.dragging { opacity: .35; }
+.scene-item.dragging { opacity: .35; }
+.tree-node.dragging { opacity: .92; box-shadow: 0 14px 34px rgba(0,0,0,.5); }
 .scene-item.drag-over, .tree-node.drag-over { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(233,180,91,.24); }
 .tree-node.drag-invalid { border-color: var(--danger); cursor: not-allowed; }
 .scene-index { position: absolute; left: 12px; top: 13px; color: var(--accent); font: 700 11px monospace; }
@@ -196,22 +199,52 @@ body.modal-open { overflow: hidden; }
 .tree-tools { display: flex; align-items: center; gap: 7px; }
 .tree-tools > span { margin-right: 8px; color: var(--muted); font-size: 11px; }
 .tree-tools .button { min-width: 38px; padding: 6px 9px; }
-.tree-viewport { position: relative; overflow: auto; background-color: #080b10; background-image: radial-gradient(#252d38 1px, transparent 1px); background-size: 24px 24px; }
-.tree-canvas { position: relative; transform-origin: 0 0; }
+.tree-viewport { position: relative; overflow: hidden; background-color: #080b10; background-image: radial-gradient(#252d38 1px, transparent 1px); background-size: 24px 24px; }
+.tree-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
 .tree-edges { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
 .tree-edges path { fill: none; stroke: #465263; stroke-width: 2; }
 .tree-nodes { position: absolute; inset: 0; }
-.tree-node { position: absolute; display: flex; flex-direction: column; justify-content: center; gap: 3px; padding: 10px 12px; color: var(--text); background: #151b23; border: 1px solid #3a4452; border-radius: 7px; text-align: left; box-shadow: 0 8px 22px rgba(0,0,0,.25); cursor: grab; }
+.tree-node { position: absolute; display: flex; flex-direction: row; align-items: stretch; gap: 8px; padding: 8px 10px; color: var(--text); background: #151b23; border: 1px solid #3a4452; border-radius: 7px; text-align: left; box-shadow: 0 8px 22px rgba(0,0,0,.25); cursor: grab; touch-action: none; overflow: hidden; }
 .tree-node:active { cursor: grabbing; }
+.tree-node.dragging { z-index: 5; }
+body.tree-dragging { user-select: none; cursor: grabbing; }
+body.tree-dragging .tree-node:hover { transform: none; }
 .tree-node:hover { z-index: 2; border-color: var(--accent); transform: translateY(-2px); }
 .tree-node.selected { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tree-node.start { border-color: var(--accent); background: linear-gradient(135deg, rgba(233,180,91,.18), #151b23 62%); }
 .tree-node.ending { border-color: rgba(90,195,154,.55); background: linear-gradient(135deg, rgba(90,195,154,.13), #151b23 62%); }
 .tree-node.grouped-node { border-color: rgba(126,212,247,.38); background: linear-gradient(135deg, rgba(126,212,247,.12), #151b23 58%); }
 .tree-node.grouped-node.start { border-color: var(--accent); background: linear-gradient(135deg, rgba(233,180,91,.18), rgba(126,212,247,.08) 45%, #151b23 74%); }
+.tree-node-thumb { position: relative; flex: 0 0 auto; width: 60px; align-self: stretch; border-radius: 5px; overflow: hidden; background: #0c1015; border: 1px solid #2a323d; }
+.tree-node-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tree-node-thumb.empty { display: flex; align-items: center; justify-content: center; color: #5a6675; font-size: 10px; }
+.tree-node-thumb.has-video::after { content: "▶"; position: absolute; right: 3px; bottom: 2px; font-size: 9px; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+.tree-node-body { display: flex; flex-direction: column; justify-content: center; gap: 3px; min-width: 0; flex: 1 1 auto; }
+.tree-node-body > * { min-width: 0; }
 .tree-node small { color: var(--accent); font-size: 9px; }
 .tree-node strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
-.tree-node span { color: var(--muted); font-size: 10px; }
+.tree-node-body span { color: var(--muted); font-size: 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tree-detail { position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 82%; display: flex; flex-direction: column; background: #11161d; border-left: 1px solid var(--line); box-shadow: -16px 0 48px rgba(0,0,0,.5); z-index: 8; }
+.tree-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.tree-detail-header small { display: block; color: var(--accent); font-size: 10px; letter-spacing: .1em; margin-bottom: 3px; }
+.tree-detail-header strong { font-size: 14px; }
+.tree-detail-stage { position: relative; background: #05080c; aspect-ratio: 16 / 9; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.tree-detail-stage video, .tree-detail-stage img { width: 100%; height: 100%; object-fit: contain; background: #05080c; }
+.tree-detail-empty { color: var(--muted); font-size: 12px; padding: 0 16px; text-align: center; }
+.tree-detail-body { flex: 1 1 auto; overflow-y: auto; padding: 14px 16px; }
+.tree-detail-field { margin-bottom: 14px; }
+.tree-detail-field > span { display: block; color: var(--accent); font-size: 10px; letter-spacing: .08em; margin-bottom: 5px; }
+.tree-detail-field p { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text); white-space: pre-wrap; }
+.tree-detail-field blockquote { margin: 0; padding: 8px 12px; border-left: 2px solid var(--accent); background: #151b23; border-radius: 0 5px 5px 0; font-size: 13px; line-height: 1.6; color: #e7d9bf; }
+.tree-detail-actions { padding: 12px 16px; border-top: 1px solid var(--line); }
+.tree-detail-nav { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: #0d1218; }
+.tree-detail-nav span { flex: 1 1 auto; text-align: center; color: var(--muted); font-size: 11px; }
+.tree-detail-nav .button { padding: 5px 8px; min-width: 0; font-size: 11px; }
+.tree-detail-shots { display: flex; gap: 6px; padding: 8px 12px; overflow-x: auto; background: #0d1218; border-bottom: 1px solid var(--line); }
+.tree-detail-shot { position: relative; flex: 0 0 auto; width: 56px; height: 34px; padding: 0; border: 1px solid #2a323d; border-radius: 4px; overflow: hidden; background: #05080c; cursor: pointer; color: #5a6675; font-size: 11px; }
+.tree-detail-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tree-detail-shot.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.tree-detail-shot.has-video::after { content: "▶"; position: absolute; right: 2px; bottom: 1px; font-size: 8px; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.9); }
 .tree-legend { display: flex; gap: 20px; align-items: center; padding: 9px 16px; color: var(--muted); border-top: 1px solid var(--line); background: #11161d; font-size: 10px; }
 .tree-legend span { display: flex; align-items: center; gap: 6px; }
 .tree-legend i { width: 9px; height: 9px; border: 1px solid #536070; border-radius: 2px; background: #151b23; }
@@ -359,3 +392,201 @@ body.mode-serial { --accent: #7ed4f7; --accent-2: #abe5ff; }
 /* 短剧播放器按钮 */
 #serialPrevBtn, #serialNextBtn { min-width: 70px; }
 #serialPrevBtn:disabled, #serialNextBtn:disabled { opacity: .35; cursor: default; }
+
+/* ── Agent 剧情助手 ──────────────────────────────────────────────────── */
+.agent-toggle-btn {
+  position: fixed;
+  bottom: 28px;
+  right: 28px;
+  z-index: 200;
+  background: var(--accent);
+  color: #0d0f14;
+  border: none;
+  border-radius: 24px;
+  padding: 10px 18px;
+  font: 700 13px/1 Inter, sans-serif;
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(233,180,91,.35);
+  transition: transform .15s, box-shadow .15s;
+}
+.agent-toggle-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(233,180,91,.45); }
+.agent-toggle-btn.active { background: var(--accent-2); }
+
+.agent-panel {
+  position: fixed;
+  bottom: 0;
+  right: -420px;
+  width: 400px;
+  height: 78vh;
+  max-height: 700px;
+  z-index: 199;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px 0 0 0;
+  display: flex;
+  flex-direction: column;
+  transition: right .25s cubic-bezier(.4,0,.2,1), width .2s, height .2s, top .2s, border-radius .2s;
+  overflow: hidden;
+}
+.agent-panel.agent-panel-open { right: 0; }
+/* 放大模式：右侧全高竖向面板 */
+.agent-panel.agent-panel-expanded.agent-panel-open {
+  width: 480px;
+  height: 100vh;
+  max-height: 100vh;
+  top: 0;
+  bottom: 0;
+  border-radius: 0;
+}
+/* topbar 也同步收窄 */
+body.agent-expanded .topbar { margin-right: 480px; transition: margin-right .25s cubic-bezier(.4,0,.2,1); }
+
+.agent-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.agent-panel-title { font: 700 14px/1 Inter, sans-serif; color: var(--accent); }
+.agent-panel-actions { display: flex; gap: 6px; }
+.agent-btn-sm { padding: 4px 10px !important; font-size: 12px !important; }
+
+.agent-chat-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 14px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-msg { display: flex; flex-direction: column; gap: 6px; max-width: 88%; }
+.agent-msg-user { align-self: flex-end; }
+.agent-msg-assistant { align-self: flex-start; width: 100%; }
+.agent-msg-error { align-self: flex-start; }
+
+.agent-msg-user .agent-msg-text {
+  background: rgba(233,180,91,.18);
+  border: 1px solid rgba(233,180,91,.3);
+  border-radius: 12px 12px 2px 12px;
+  padding: 9px 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  display: inline-block;
+  max-width: 88%;
+}
+.agent-msg-assistant .agent-msg-text {
+  display: block;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 0 12px 12px 12px;
+  padding: 10px 13px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+  /* Markdown 元素重置 */
+}
+.agent-msg-assistant .agent-msg-text:empty { display: none; }
+.agent-msg-error .agent-msg-text {
+  background: rgba(223,107,112,.12);
+  border: 1px solid rgba(223,107,112,.3);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+/* Markdown 内容样式 */
+.agent-msg-text .agent-p { margin: 0 0 8px; }
+.agent-msg-text .agent-p:last-child { margin-bottom: 0; }
+.agent-msg-text .agent-h { margin: 10px 0 4px; font-weight: 500; color: var(--accent); }
+.agent-msg-text h2.agent-h { font-size: 14px; }
+.agent-msg-text h3.agent-h { font-size: 13px; }
+.agent-msg-text h4.agent-h { font-size: 12px; }
+.agent-msg-text ul, .agent-msg-text ol { padding-left: 18px; margin: 4px 0; }
+.agent-msg-text li { margin-bottom: 3px; }
+.agent-msg-text strong { font-weight: 500; color: var(--text); }
+.agent-msg-text em { font-style: italic; color: var(--muted); }
+.agent-msg-text .agent-hr { border: none; border-top: 1px solid var(--line); margin: 8px 0; }
+.agent-code-block { background: #0c1015; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font: 12px/1.55 monospace; overflow-x: auto; margin: 6px 0; white-space: pre; }
+.agent-code-inline { background: rgba(255,255,255,.07); border-radius: 4px; padding: 1px 5px; font: 12px/1 monospace; }
+/* 表格 */
+.agent-table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 8px 0; }
+.agent-table th, .agent-table td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; }
+.agent-table th { background: rgba(255,255,255,.04); color: var(--accent); font-weight: 500; }
+.agent-table tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+
+/* tool 调用区域（显示在气泡上方） */
+.agent-tools-zone { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.agent-tool-tag {
+  display: inline-block;
+  background: rgba(126,212,247,.08);
+  border: 1px solid rgba(126,212,247,.2);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: #7ed4f7;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 思考过程折叠 */
+.agent-think-zone {
+  border: 1px solid rgba(233,180,91,.2);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  overflow: hidden;
+}
+.agent-think-summary {
+  cursor: pointer;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.agent-think-summary::before { content: "▶"; font-size: 9px; transition: transform .15s; }
+.agent-think-zone[open] .agent-think-summary::before { transform: rotate(90deg); }
+.agent-think-body {
+  padding: 8px 10px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.55;
+  border-top: 1px solid rgba(233,180,91,.15);
+}
+
+/* patch 应用按钮区 */
+.agent-patch-zone { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.agent-apply-btn {
+  font-size: 12px !important;
+  padding: 6px 12px !important;
+  border-radius: 8px !important;
+}
+
+.agent-input-row {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px 14px;
+  border-top: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.agent-input {
+  flex: 1;
+  resize: none;
+  font-size: 13px;
+  min-height: 52px;
+  max-height: 120px;
+}
+.agent-send-btn {
+  align-self: flex-end;
+  white-space: nowrap;
+  padding: 10px 14px !important;
+}

@@ -122,7 +122,7 @@ $env:VIDEO_MODEL_API_KEY="your-video-key"
 | 单集生成 | 文本模型或本地模板仅生成当前集，不覆盖其他分集 |
 | 角色一致性 | 跨集角色参考，改善人物外观一致性 |
 | 镜头衔接 | 管理相邻镜头的进入状态、离开状态和转场类型 |
-| 成片导出 | 使用 FFmpeg 将当前集镜头拼接为独立 MP4 |
+| 成片导出 | 使用 FFmpeg 将当前集镜头拼接为独立 MP4（后台任务，实时进度，可随时取消）|
 
 ### AI 与素材
 
@@ -181,14 +181,15 @@ python app.py
 <a id="compatibility"></a>
 ## 🔌 模型兼容性
 
-| 模型类型 | 所需协议 |
+| 模型类型 | 内置可选供应商 |
 | --- | --- |
-| 文本模型 | OpenAI Chat Completions 兼容接口 |
-| 文生图 / 参考图编辑 | AtlasCloud `generateImage` 异步协议 |
-| 图生视频 | AtlasCloud `generateVideo` 异步协议 |
-| 任务查询 | AtlasCloud `prediction/{id}` 查询协议 |
+| 文本模型 | 任意 OpenAI Chat Completions 兼容接口 |
+| 文生图 / 参考图编辑 | AtlasCloud 异步协议 · OpenAI 兼容图像（`/images/generations`）· 阿里通义万相（DashScope） |
+| 图生视频 | AtlasCloud 异步协议 · 火山方舟 Seedance · 阿里通义万相（DashScope） |
 
-文本、图片和视频可以使用不同供应商。**仅修改 Base URL 并不能适配协议不同的供应商**，此类供应商需要在后端增加适配器（参见 [development.md](development.md)）。
+文本、图片和视频可分别选择不同供应商。文生图与图生视频在设置区提供**供应商下拉**与**测试连接**按钮（测试连接为零成本的连通性+鉴权校验，不会真正生成素材或扣费）。切换供应商会自动填入该供应商推荐的 Base URL 与模型 ID。
+
+如需接入更多协议不同的供应商，在 `backend/providers.py` 中实现一个适配器子类并注册即可，无需改动核心流程（参见 [development.md](development.md)）。
 
 ---
 
@@ -232,6 +233,17 @@ python app.py
 ```powershell
 python -m unittest -v backend.test_server
 ```
+
+前端源码位于 `static/src/`（ES Module），由 esbuild 打包为运行时单文件 `static/dist/bundle.js`。修改前端后需重新构建并运行前端测试：
+
+```powershell
+npm install          # 仅首次：安装 esbuild / vitest（开发期依赖）
+npm run build        # 打包到 static/dist/bundle.js
+npm test             # 运行 Vitest 前端单元 / 冒烟测试
+npm run watch        # 开发时自动重建
+```
+
+> 运行时仍是零依赖静态文件：Python 标准库 HTTP 服务直接托管打包产物，无需 Node。`node_modules/` 仅在开发期需要。
 
 项目结构、运行逻辑、数据模型、接口和扩展方式请参阅 [development.md](development.md)。
 

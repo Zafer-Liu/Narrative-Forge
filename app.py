@@ -445,6 +445,8 @@ def build_story_payload(data):
         "synopsis": require_string(data, "synopsis", 6000),
         "genre": require_string(data, "genre", 80),
         "character": str(data.get("character", ""))[:3000],
+        "characters": data.get("characters", []) if isinstance(data.get("characters"), list) else [],
+        "scene_cards": data.get("scene_cards", []) if isinstance(data.get("scene_cards"), list) else [],
         "visual_style": str(data.get("visual_style", ""))[:3000],
         "tree_depth": depth,
         "branch_count": branches,
@@ -463,12 +465,16 @@ def build_story_payload(data):
         "每个非结局互动剧情节点的最后一个分镜必须恰好拥有 branch_count 个 choices，且 choice.targetKey 必须指向目标互动剧情节点的第 1 个分镜；"
         "最后一层互动剧情节点的最后分镜 choices 为空。\n"
         f"项目设定：{json.dumps(story, ensure_ascii=False)}\n"
-        "返回结构：{\"startKey\":\"n0_s1\",\"scenes\":[{\"key\":\"n0_s1\",\"storyNodeKey\":\"n0\",\"shotInNode\":1,\"shotsInNode\":shots_per_node,\"title\":\"...\","
+        "返回结构：{\"startKey\":\"n0_s1\",\"characters\":[{\"name\":\"角色名\",\"ageRange\":\"年龄段\",\"gender\":\"性别呈现\",\"hair\":\"发型\",\"outfit\":\"服装\",\"props\":\"携带物品/特征\",\"emotion\":\"情绪基调\",\"performance\":\"表演风格\",\"notes\":\"备注\"}],"
+        "\"sceneCards\":[{\"name\":\"场景名\",\"type\":\"室内|室外|走廊|车辆等\",\"lighting\":\"光线描述\",\"colorTone\":\"色调\",\"atmosphere\":\"氛围\",\"environment\":\"环境细节\",\"timeOfDay\":\"时段\",\"notes\":\"备注\"}],"
+        "\"scenes\":[{\"key\":\"n0_s1\",\"storyNodeKey\":\"n0\",\"shotInNode\":1,\"shotsInNode\":shots_per_node,\"title\":\"...\","
         "\"shot\":\"大全景|全景|中景|近景|特写\",\"duration\":8,\"action\":\"...\","
         "\"dialogue\":\"...\",\"choices\":[{\"text\":\"...\",\"effect\":\"...\","
         "\"targetKey\":\"n1_s1\"}],\"nextKey\":\"n0_s2\"}]}。key 必须唯一，nextKey 和 targetKey 必须指向 scenes 中存在的 key。"
         "每个分镜 action 只写一个不可再分的动作或表演节拍，避免把整个互动节点剧情塞进单镜；"
         "dialogue 只保留当前分镜实际说出的对白，单镜最长按 15 秒设计。"
+        "如果已有角色卡，请保持角色身份一致并补充细节；如果暂无角色卡，请根据故事梗概创建所需角色。characters 数组中每个角色必须包含 name 字段，确保跨镜头角色外观连续。"
+        "sceneCards 数组应列出本剧中出现的所有主要场景，每个场景卡必须包含 name 字段，其余字段描述该场景的固定视觉特征（光线、色调、氛围、环境、时段），用于跨镜头环境一致性。如果已有场景卡，请保持一致并补充细节；如果暂无场景卡，请根据剧情创建所需场景。"
     )
     return {
         "model": require_model(data, "model", "deepseek-v3"),
@@ -508,12 +514,21 @@ def validate_image_params(data):
         "output_format": output_format,
         "moderation": data.get("moderation", "low"),
         "reference_image": "",
+        "reference_images": [],
     }
-    reference_url = data.get("reference_image_url", "")
-    if reference_url:
-        # 校验编辑模型 ID（旧逻辑：有参考图才要求该字段是合法模型 ID）
+    # 多参考图：前端可传 reference_image_urls 数组，同时保留旧的单值 reference_image_url
+    reference_urls = data.get("reference_image_urls", [])
+    if not isinstance(reference_urls, list):
+        reference_urls = []
+    if not reference_urls:
+        single_url = data.get("reference_image_url", "")
+        if single_url:
+            reference_urls = [single_url]
+    if reference_urls:
         params["edit_model"] = require_model(data, "image_edit_model", "openai/gpt-image-2/edit")
-        params["reference_image"] = resolve_reference_image(require_string(data, "reference_image_url", 10000))
+        resolved = [resolve_reference_image(require_string({"v": u}, "v", 10000)) for u in reference_urls[:4]]
+        params["reference_images"] = resolved
+        params["reference_image"] = resolved[0]
     return params
 
 

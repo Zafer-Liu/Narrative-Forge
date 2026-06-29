@@ -29,6 +29,18 @@ button { cursor: pointer; }
 .status-pill.ready { color: var(--success); border-color: rgba(90,195,154,.35); }
 .status-pill.warning { color: var(--accent); border-color: rgba(233,180,91,.35); }
 
+/* 顶部"更多"下拉菜单 */
+.top-dropdown { position: relative; }
+.top-dropdown .caret { font-size: 10px; opacity: .7; margin-left: 2px; }
+.top-dropdown-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 50;
+  display: none; flex-direction: column; gap: 4px; min-width: 180px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px; box-shadow: 0 12px 36px rgba(0,0,0,.5);
+}
+.top-dropdown.open .top-dropdown-menu { display: flex; }
+.top-dropdown-menu .button { width: 100%; text-align: left; justify-content: flex-start; }
+
 .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 330px) minmax(270px, 310px) minmax(520px, 1fr); gap: 1px; background: var(--line); transition: margin-right .25s cubic-bezier(.4,0,.2,1); }
 /* Agent 面板放大时，主内容区右移 480px，让出空间 */
 body.agent-expanded .workspace { margin-right: 480px; }
@@ -36,6 +48,7 @@ body.agent-expanded .workspace { margin-right: 480px; }
 .panel-title { display: flex; gap: 10px; align-items: center; margin-bottom: 22px; }
 .panel-title span { color: var(--accent); font: 700 11px/1 monospace; }
 .panel-title h2 { margin: 0; font-size: 15px; letter-spacing: .05em; }
+.toggle-all-settings { width: 100%; margin-bottom: 12px; text-align: center; }
 .row-title { justify-content: space-between; }
 .row-title > div { display: flex; align-items: center; gap: 10px; }
 .editor-actions { display: flex; gap: 8px; }
@@ -56,6 +69,7 @@ input:focus, textarea:focus, select:focus { border-color: #8c744a; box-shadow: 0
 .button.generating { border-color: var(--danger); color: var(--danger); cursor: pointer; animation: pulse-gen 1.5s ease-in-out infinite; }
 @keyframes pulse-gen { 0%, 100% { opacity: 1; } 50% { opacity: .6; } }
 .wide { width: 100%; padding: 11px; }
+.button.small { padding: 5px 10px; font-size: 11px; font-weight: 600; }
 .secondary-draft { margin-top: 8px; }
 .hint { color: #667183; font-size: 11px; }
 .dialogue-timing-hint { display:block; margin-top:5px; color:var(--muted); font-size:10px; }
@@ -590,3 +604,133 @@ body.agent-expanded .topbar { margin-right: 480px; transition: margin-right .25s
   white-space: nowrap;
   padding: 10px 14px !important;
 }
+
+
+/* ── 设置分组折叠 ── */
+.setting-group { margin: 0 0 14px; border: 1px solid var(--line); border-radius: 6px; background: rgba(12,16,21,.35); }
+.setting-group > summary { cursor: pointer; padding: 8px 13px; font-size: 12px; font-weight: 650; color: var(--text); user-select: none; list-style: none; display: flex; align-items: baseline; gap: 6px; }
+.setting-group > summary::-webkit-details-marker { display: none; }
+.setting-group > summary::before { content: "▸"; font-size: 10px; color: var(--accent); transition: transform .15s; display: inline-block; }
+.setting-group[open] > summary::before { transform: rotate(90deg); }
+.setting-group > summary small { color: var(--muted); font-weight: 400; font-size: 11px; }
+.setting-group[open] > summary { border-bottom: 1px solid var(--line); }
+.setting-group[open] { padding: 10px 13px 13px; }
+.setting-group[open] > summary { margin: -10px -13px 8px; }
+.setting-group .mode-section { margin: 0; }
+
+/* ── 角色卡面板（O1 结构化角色设定，每张卡可折叠） ── */
+.character-panel { display: flex; flex-direction: column; gap: 10px; }
+.character-card { border: 1px solid var(--line); border-radius: 6px; background: rgba(12,16,21,.6); overflow: hidden; }
+.character-card > summary { cursor: pointer; padding: 8px 12px; list-style: none; display: flex; align-items: center; gap: 6px; user-select: none; }
+.character-card > summary::-webkit-details-marker { display: none; }
+.character-card > summary::before { content: "▸"; font-size: 10px; color: var(--accent); transition: transform .15s; display: inline-block; }
+.character-card[open] > summary::before { transform: rotate(90deg); }
+.character-card > summary strong { color: var(--accent); font-size: 12px; letter-spacing: .03em; }
+.character-card > summary .remove-char { margin-left: auto; color: var(--danger); font-size: 11px; }
+.character-card[open] > summary { border-bottom: 1px solid var(--line); }
+.character-card[open] { padding: 0 12px 10px; }
+.character-card[open] > summary { margin: 0 -12px 8px; }
+.char-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+.char-grid label { margin-bottom: 0; font-size: 11px; }
+.char-grid input { margin-top: 3px; padding: 7px 9px; font-size: 12px; }
+.character-card > label { margin-bottom: 0; margin-top: 6px; font-size: 11px; }
+.character-card textarea { margin-top: 3px; padding: 7px 9px; font-size: 12px; min-height: 36px; }
+#addCharacterBtn { margin-top: 4px; }
+.char-portrait { margin-bottom: 10px; }
+.char-portrait img { width: 100%; border-radius: 5px; border: 1px solid var(--line); display: block; margin-bottom: 6px; }
+.char-portrait-img-wrap { position: relative; margin-bottom: 6px; }
+.char-portrait-img-wrap img { margin-bottom: 0; }
+.char-img-zoom {
+  position: absolute; top: 8px; right: 8px;
+  width: 28px; height: 28px; line-height: 26px; text-align: center;
+  background: rgba(0,0,0,.65); color: #fff; border: 1px solid rgba(255,255,255,.25);
+  border-radius: 5px; cursor: pointer; font-size: 16px; padding: 0;
+  backdrop-filter: blur(4px); transition: background .2s;
+}
+.char-img-zoom:hover { background: rgba(0,0,0,.85); }
+.char-portrait-loading { display: flex; align-items: center; gap: 8px; padding: 14px; color: var(--muted); font-size: 12px; background: rgba(12,16,21,.6); border: 1px solid var(--line); border-radius: 5px; margin-bottom: 6px; }
+.char-portrait .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: char-spin .7s linear infinite; flex-shrink: 0; }
+@keyframes char-spin { to { transform: rotate(360deg); } }
+
+/* 场景卡视觉区分：摘要标题用青色 */
+.character-card.scene-card > summary strong { color: #7ed4f7; }
+.character-card.scene-card > summary::before { color: #7ed4f7; }
+
+/* 全部展开/收起 按钮 */
+.card-toggle-all { font-size: 11px; color: var(--muted); cursor: pointer; padding: 4px 0 6px; user-select: none; }
+.card-toggle-all:hover { color: var(--accent); }
+
+/* 场景列表：角色/场景卡关联标记 */
+.scene-card-badges { display: inline-flex; gap: 3px; margin-left: 6px; }
+.scene-card-badges .badge { font-size: 9px; padding: 1px 4px; border-radius: 3px; background: rgba(233,180,91,.15); color: var(--accent); }
+.scene-card-badges .badge.scene { background: rgba(126,212,247,.15); color: #7ed4f7; }
+
+/* 分镜操作区布局 */
+.storyboard-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* ── 全屏项目概览编辑 ── */
+.project-overview {
+  position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+  background: var(--bg); z-index: 9999; overflow-y: auto;
+  padding: 24px 32px; box-sizing: border-box;
+}
+.overview-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--line);
+}
+.overview-header h2 { margin: 0; font-size: 18px; letter-spacing: .04em; color: var(--text); }
+.overview-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+  grid-template-areas: "basic basic" "characters scenes" "script script";
+  max-width: 1400px; margin: 0 auto;
+}
+.overview-section {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 18px; overflow-y: auto;
+}
+.overview-section h3 {
+  margin: 0 0 14px; font-size: 14px; color: var(--accent);
+  letter-spacing: .04em; border-bottom: 1px solid var(--line); padding-bottom: 8px;
+}
+.overview-basic { grid-area: basic; padding: 12px 18px; }
+.overview-basic-row { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 10px; }
+.overview-basic-row label { margin-bottom: 6px; }
+.overview-basic textarea { min-height: 32px; }
+.overview-characters { grid-area: characters; max-height: none; }
+.overview-scenes { grid-area: scenes; max-height: none; }
+.overview-script { grid-area: script; max-height: 35vh; }
+.overview-content { display: flex; flex-direction: column; gap: 12px; }
+.overview-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 20px; }
+
+/* 角色卡/场景卡在全屏页面里的图片更大 */
+.project-overview .char-portrait img { max-height: 280px; object-fit: contain; }
+
+/* 分镜列表条目 */
+.overview-scene-item {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 10px 12px; margin-bottom: 8px;
+}
+.overview-scene-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.overview-scene-num {
+  flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%;
+  background: rgba(233,180,91,.15); color: var(--accent);
+  font: 700 11px/24px monospace; text-align: center;
+}
+.overview-scene-title { flex: 1; min-width: 0; }
+.overview-scene-shot, .overview-scene-duration { width: auto; min-width: 70px; }
+.overview-scene-action, .overview-scene-dialogue {
+  width: 100%; margin-top: 6px; font-size: 12px;
+}
+.overview-scene-action { color: var(--text); }
+.overview-scene-dialogue { color: var(--muted); }
+
+/* ── 独立图片放大预览弹层 ── */
+.img-zoom-overlay {
+  position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+  background: rgba(0,0,0,.9); z-index: 99999;
+  display: none; align-items: center; justify-content: center;
+  cursor: zoom-out; flex-direction: column; gap: 12px;
+}
+.img-zoom-overlay img { max-width: 90vw; max-height: 85vh; border-radius: 8px; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
+.img-zoom-hint { color: rgba(255,255,255,.5); font-size: 13px; }
+

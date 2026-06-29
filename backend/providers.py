@@ -118,9 +118,10 @@ class AtlasCloudImageAdapter(BaseAdapter):
             "size": params["size"],
             "moderation": params.get("moderation", "low"),
         }
-        if params.get("reference_image"):
+        ref_images = params.get("reference_images") or ([params["reference_image"]] if params.get("reference_image") else [])
+        if ref_images:
             payload["model"] = params.get("edit_model") or self.default_edit_model
-            payload["images"] = [params["reference_image"]]
+            payload["images"] = ref_images
         return {"method": "POST", "path": "generateImage", "json": payload, "extra_headers": {}}
 
     def read_submit(self, resp):

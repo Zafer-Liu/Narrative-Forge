@@ -11,10 +11,11 @@ import {
   readMetaFromForm, saveProject, createScene, normalizeSceneOrder,
   activeEpisode, ensureAtLeastOneEpisode, firstEpisodeMasterScene,
   snapshotProjectBeforeReplacement, saveProviderSecrets, providerSettings,
+  normalizeCharacterCard, normalizeSceneCard, characterCardToText, autoAssociateCards,
 } from "./project-model.js";
 import { composeImagePrompt, composeVideoPrompt, rebuildSerialTransitions } from "./prompt.js";
 import { syncEpisodeFromForm } from "./episodes.js";
-import { render } from "./render.js";
+import { render, renderCharacterPanel, renderSceneCardPanel } from "./render.js";
 import { requestJson } from "./api.js";
 
 // ─────────────────────────────────────────────
@@ -188,6 +189,11 @@ export function buildLocalDraft() {
   const intro = project.scenes.find((scene) => scene.id === expanded.startIdByKey.get("n_0_0")) || project.scenes[0];
   project.startSceneId = intro.id;
   project.scenes.forEach((scene) => { scene.referenceSceneId = scene.id === intro.id ? "" : intro.id; });
+  autoAssociateCards(project.scenes, project.meta);
+  project.scenes.forEach((scene) => {
+    scene.imagePrompt = composeImagePrompt(scene);
+    scene.videoPrompt = composeVideoPrompt(scene);
+  });
   normalizeSceneOrder();
   project.selectedSceneId = intro.id;
   saveProject(); render();
@@ -246,6 +252,11 @@ export function buildLocalSerialDraft() {
     scene.referenceSceneId = scene.id === firstScene.id
       ? (episode.order > 0 && seriesMaster?.id !== scene.id ? seriesMaster?.id || "" : "")
       : firstScene.id;
+  });
+  autoAssociateCards(project.scenes, project.meta);
+  project.scenes.forEach((scene) => {
+    scene.imagePrompt = composeImagePrompt(scene);
+    scene.videoPrompt = composeVideoPrompt(scene);
   });
   normalizeSceneOrder();
   project.selectedSceneId = firstScene.id;
@@ -309,7 +320,12 @@ export async function generateSerialDraft() {
 片名：${meta.title}
 全剧梗概：${meta.synopsis}
 类型与基调：${meta.genre} / ${meta.serialTone}
-固定角色：${meta.character || "待定"}
+已有角色卡：${Array.isArray(meta.characters) && meta.characters.length
+    ? meta.characters.map((c, i) => `\n  角色${i + 1}：${characterCardToText(c)}`).join("")
+    : "暂无，请根据全剧梗概为本集创建所需角色卡"}
+已有场景卡：${Array.isArray(meta.sceneCards) && meta.sceneCards.length
+    ? meta.sceneCards.map((s, i) => `\n  场景${i + 1}：${s.name}${s.type ? `（${s.type}）` : ""}${s.lighting ? `，光线：${s.lighting}` : ""}${s.atmosphere ? `，氛围：${s.atmosphere}` : ""}${s.environment ? `，环境：${s.environment}` : ""}${s.timeOfDay ? `，时段：${s.timeOfDay}` : ""}`).join("")
+    : "暂无，请根据剧情为本集创建所需场景卡"}
 统一视觉风格：${meta.visualStyle || "现代电影质感"}
 
 【本集设定】
@@ -324,6 +340,31 @@ export async function generateSerialDraft() {
 返回严格的 JSON，格式如下（不要 markdown 围栏）：
 {
   "startKey": "shot_1",
+  "characters": [
+    {
+      "name": "角色名",
+      "ageRange": "年龄段",
+      "gender": "性别呈现",
+      "hair": "发型",
+      "outfit": "服装",
+      "props": "携带物品/特征",
+      "emotion": "情绪基调",
+      "performance": "表演风格",
+      "notes": "备注/补充"
+    }
+  ],
+  "sceneCards": [
+    {
+      "name": "场景名",
+      "type": "室内|室外|走廊|车辆等",
+      "lighting": "光线描述",
+      "colorTone": "色调",
+      "atmosphere": "氛围",
+      "environment": "环境细节",
+      "timeOfDay": "时段",
+      "notes": "备注/补充"
+    }
+  ],
   "scenes": [
     {
       "key": "shot_1",
@@ -348,7 +389,9 @@ export async function generateSerialDraft() {
 4. dialogue 只包含当前镜头实际说出的对白或旁白，不得朗读 action 或剧情梗概。按每秒最多约 3 个中文字计算：4秒不超过7字、6秒不超过13字、8秒不超过19字、10秒不超过25字、12秒不超过31字、15秒不超过40字；需要更多对白时必须拆到后续镜头。
 5. 人物身份、服装、地点状态和情绪在相邻镜头间连续，但连续性信息不得替代当前镜头事件。
 6. 每镜必须给出 entryState 与 exitState；第 N 镜的 exitState 必须能直接成为第 N+1 镜的 entryState。保持人物屏幕方向、动作方向、视线、手中道具、环境光线和声音底噪连续。
-7. transition 只能是 match、dissolve、cut、fade；同一场景连续动作优先 match，时间或地点轻微变化用 dissolve，强烈段落转换才用 cut 或 fade。`;
+7. transition 只能是 match、dissolve、cut、fade；同一场景连续动作优先 match，时间或地点轻微变化用 dissolve，强烈段落转换才用 cut 或 fade。
+8. 如果已有角色卡，请保持角色身份一致并补充细节；如果暂无角色卡，请根据全剧梗概创建本集所需的所有角色。characters 数组中每个角色必须包含 name 字段，其余字段按需填写，确保跨镜头角色外观连续。
+9. sceneCards 数组应列出本集出现的所有主要场景，每个场景卡必须包含 name 字段，其余字段描述该场景的固定视觉特征（光线、色调、氛围、环境、时段），用于跨镜头环境一致性。如果已有场景卡，请保持一致并补充细节；如果暂无场景卡，请根据剧情创建所需场景。`;
 
   try {
     const result = await requestJson("/api/generate-episode", { method: "POST", body: JSON.stringify({
@@ -414,6 +457,22 @@ export function installGeneratedSerial(generated, meta, episode) {
       : startId;
   });
   project.meta = meta;
+  if (Array.isArray(generated.characters) && generated.characters.length) {
+    project.meta.characters = generated.characters.map((c) => normalizeCharacterCard(c));
+    project.meta.character = project.meta.characters.length
+      ? characterCardToText(project.meta.characters[0])
+      : "";
+    renderCharacterPanel();
+  }
+  if (Array.isArray(generated.sceneCards) && generated.sceneCards.length) {
+    project.meta.sceneCards = generated.sceneCards.map((s) => normalizeSceneCard(s));
+    renderSceneCardPanel();
+  }
+  autoAssociateCards(scenes, project.meta);
+  scenes.forEach((scene) => {
+    scene.imagePrompt = composeImagePrompt(scene);
+    scene.videoPrompt = composeVideoPrompt(scene);
+  });
   project.scenes = scenes;
   project.startSceneId = startId;
   project.selectedSceneId = startId;
@@ -449,6 +508,8 @@ export async function generateStoryDraft() {
       synopsis: meta.synopsis,
       genre: meta.genre,
       character: meta.character,
+      characters: meta.characters,
+      scene_cards: meta.sceneCards,
       visual_style: meta.visualStyle,
       tree_depth: meta.treeDepth,
       branch_count: meta.branchCount,
@@ -564,6 +625,22 @@ export function installGeneratedStory(generated, meta, expectedNodes) {
     scene.referenceSceneId = scene.id === finalStartId ? "" : finalStartId;
   });
   project.meta = meta;
+  if (Array.isArray(generated.characters) && generated.characters.length) {
+    project.meta.characters = generated.characters.map((c) => normalizeCharacterCard(c));
+    project.meta.character = project.meta.characters.length
+      ? characterCardToText(project.meta.characters[0])
+      : "";
+    renderCharacterPanel();
+  }
+  if (Array.isArray(generated.sceneCards) && generated.sceneCards.length) {
+    project.meta.sceneCards = generated.sceneCards.map((s) => normalizeSceneCard(s));
+    renderSceneCardPanel();
+  }
+  autoAssociateCards(finalScenes, project.meta);
+  finalScenes.forEach((scene) => {
+    scene.imagePrompt = composeImagePrompt(scene);
+    scene.videoPrompt = composeVideoPrompt(scene);
+  });
   project.scenes = finalScenes;
   project.startSceneId = finalStartId;
   project.selectedSceneId = finalStartId;

@@ -8,6 +8,15 @@ import { interactiveStoryGroups, storyNodeTitle } from "./story-graph.js";
 import { syncEditorToScene, render, renderEditor } from "./render.js";
 import { renderTreeBrowser } from "./tree.js";
 
+function sceneCardBadges(scene) {
+  const parts = [];
+  if (Array.isArray(scene.characterIds) && scene.characterIds.length)
+    parts.push(`<span class="badge">角色${scene.characterIds.length}</span>`);
+  if (scene.sceneCardId)
+    parts.push(`<span class="badge scene">场景</span>`);
+  return parts.length ? `<span class="scene-card-badges">${parts.join("")}</span>` : "";
+}
+
 export function renderSceneList() {
   if (currentMode === "serial") {
     const filter = $("#serialEpisodeFilter");
@@ -37,7 +46,7 @@ export function renderSceneList() {
         item.dataset.sceneId = scene.id;
         const flow = scene.choices.length ? `${scene.choices.length} 个选择` : scene.nextSceneId ? "自动连接" : "结局";
         item.innerHTML = `<span class="scene-index">${String(shotIndex + 1).padStart(2, "0")}</span>
-          <strong></strong><span class="scene-meta">${escapeHtml(scene.shot)} · ${scene.duration} 秒 · ${flow}</span>
+          <strong></strong><span class="scene-meta">${escapeHtml(scene.shot)} · ${scene.duration} 秒 · ${flow}</span>${sceneCardBadges(scene)}
           ${scene.id === project.startSceneId ? '<span class="start-badge">起点</span>' : ""}
           <span class="asset-dots"><i class="${statusClass(scene.imageStatus, scene.imageUrl || scene.imageLocalUrl)}"></i><i class="${statusClass(scene.videoStatus, scene.videoUrl || scene.videoLocalUrl)}"></i></span>`;
         item.querySelector("strong").textContent = scene.title.replace(/\s*·\s*分镜\s*\d+\s*\/\s*\d+\s*$/, "");
@@ -64,7 +73,7 @@ export function renderSceneList() {
       metaText = `${shotLabel}${escapeHtml(scene.shot)} · ${scene.duration} 秒 · ${flowLabel}`;
     }
     item.innerHTML = `<span class="scene-index">${String(index + 1).padStart(2, "0")}</span>
-      <strong></strong><span class="scene-meta">${metaText}</span>
+      <strong></strong><span class="scene-meta">${metaText}</span>${sceneCardBadges(scene)}
       ${scene.id === project.startSceneId ? '<span class="start-badge">起点</span>' : ""}
       <span class="asset-dots"><i class="${statusClass(scene.imageStatus, scene.imageUrl || scene.imageLocalUrl)}"></i><i class="${statusClass(scene.videoStatus, scene.videoUrl || scene.videoLocalUrl)}"></i></span>`;
     item.querySelector("strong").textContent = scene.title;

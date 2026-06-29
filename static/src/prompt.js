@@ -1,6 +1,6 @@
 import { currentMode } from "./state.js";
 import { narrativeSentences, transitionLabel } from "./utils.js";
-import { readMetaFromForm, orderedScenes, saveProject } from "./project-model.js";
+import { readMetaFromForm, orderedScenes, saveProject, characterCardToText } from "./project-model.js";
 import { renderEditor } from "./render.js";
 import { showToast } from "./utils.js";
 
@@ -51,6 +51,74 @@ export function rebuildSerialTransitions(showResult = false, preserveCamera = fa
 // ─────────────────────────────────────────────
 //  提示词合成
 // ─────────────────────────────────────────────
+// 按出场角色注入角色连续性区块：优先用 scene.characterIds 指定的角色，
+// 未指定时默认用主角（第一张角色卡），回退到旧 meta.character 文本。
+// 对应文章方法论："每个相关镜头都重复角色核心识别信息"。
+function characterContinuityBlock(scene) {
+  const meta = readMetaFromForm();
+  const cards = Array.isArray(meta.characters) ? meta.characters : [];
+  let active = [];
+  if (Array.isArray(scene.characterIds) && scene.characterIds.length) {
+    active = scene.characterIds.map((id) => cards.find((c) => c.id === id)).filter(Boolean);
+  }
+  if (!active.length) active = cards.slice(0, 1);
+  if (!active.length && meta.character) return `角色连续性设定：${meta.character}。`;
+  if (!active.length) return "";
+  const list = active.map(characterCardToText).join("；");
+  return `角色连续性设定：${list}。同一镜头内严格保持角色外观、发型、服装与道具一致。`;
+}
+
+export function composeCharacterPortraitPrompt(card) {
+  const meta = readMetaFromForm();
+  const parts = [
+    "角色设定参考图，全身正面像，中性背景。",
+    `角色：${card.name}。`,
+    card.ageRange ? `年龄：${card.ageRange}。` : "",
+    card.gender ? `性别呈现：${card.gender}。` : "",
+    card.hair ? `发型：${card.hair}。` : "",
+    card.outfit ? `服装：${card.outfit}。` : "",
+    card.props ? `携带物品/特征：${card.props}。` : "",
+    card.emotion ? `情绪基调：${card.emotion}。` : "",
+    card.performance ? `表演风格：${card.performance}。` : "",
+    card.notes ? `补充：${card.notes}。` : "",
+    meta.visualStyle ? `视觉风格：${meta.visualStyle}。` : "",
+    "清晰展示角色面部、发型、服装和道具细节，供后续镜头角色一致性参考。无文字、无水印、无界面元素。",
+  ];
+  return parts.filter(Boolean).join("\n");
+}
+
+export function composeSceneCardPrompt(card) {
+  const meta = readMetaFromForm();
+  const parts = [
+    "场景设定参考图，无人物的空镜 establishing shot。",
+    `场景：${card.name}。`,
+    card.type ? `场景类型：${card.type}。` : "",
+    card.lighting ? `光照：${card.lighting}。` : "",
+    card.colorTone ? `色调：${card.colorTone}。` : "",
+    card.atmosphere ? `氛围：${card.atmosphere}。` : "",
+    card.environment ? `环境细节：${card.environment}。` : "",
+    card.timeOfDay ? `时间/天气：${card.timeOfDay}。` : "",
+    card.notes ? `补充：${card.notes}。` : "",
+    meta.visualStyle ? `视觉风格：${meta.visualStyle}。` : "",
+    "清晰展示场景空间布局、光照条件和环境道具，供后续镜头场景一致性参考。无文字、无水印、无界面元素。",
+  ];
+  return parts.filter(Boolean).join("\n");
+}
+
+function sceneCardBlock(scene) {
+  const meta = readMetaFromForm();
+  const cards = Array.isArray(meta.sceneCards) ? meta.sceneCards : [];
+  const card = scene.sceneCardId ? cards.find((c) => c.id === scene.sceneCardId) : null;
+  if (!card) return "";
+  const parts = [
+    card.lighting ? `光照：${card.lighting}` : "",
+    card.colorTone ? `色调：${card.colorTone}` : "",
+    card.atmosphere ? `氛围：${card.atmosphere}` : "",
+    card.environment ? `环境：${card.environment}` : "",
+  ].filter(Boolean).join("，");
+  return `场景连续性设定：${card.name}。${parts}。同一镜头内严格保持场景光照、色调和环境一致。`;
+}
+
 export function composeImagePrompt(scene) {
   const meta = readMetaFromForm();
   const modeLabel = currentMode === "serial" ? "AI短剧" : `${meta.genre}互动影游`;
@@ -59,7 +127,8 @@ export function composeImagePrompt(scene) {
     `${modeLabel}的电影关键帧，${scene.shot}。`,
     entryState ? `这是当前视频的起始帧，人物、视线、位置、道具和环境必须准确处于入口状态：${entryState}` : "",
     `当前镜头唯一事件与表演：${scene.action || "角色处于故事场景中"}。`,
-    meta.character ? `角色连续性设定：${meta.character}。` : "",
+    characterContinuityBlock(scene),
+    sceneCardBlock(scene),
     meta.visualStyle ? `视觉风格：${meta.visualStyle}。` : "",
     `只表现当前镜头，不概括、不预演本集其他情节。构图适合${meta.aspectRatio}画幅，电影灯光，无文字、无水印、无界面元素。`,
   ].filter(Boolean).join("\n");

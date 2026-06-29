@@ -6,7 +6,7 @@ import {
 } from "./project-model.js";
 import { setMode } from "./mode.js";
 import { composeImagePrompt, composeVideoPrompt, rebuildSerialTransitions } from "./prompt.js";
-import { render, renderEditor, syncEditorToScene, addChoice, updateDialogueTiming, renderReferenceSelector } from "./render.js";
+import { render, renderEditor, syncEditorToScene, addChoice, updateDialogueTiming, renderReferenceSelector, openProjectOverview, closeProjectOverview } from "./render.js";
 import { renderSceneList } from "./scene-list.js";
 import { generateStoryDraft, buildLocalDraft, testTextProvider, testImageProvider, testVideoProvider, updateTreeEstimate, updateSerialEstimate } from "./draft.js";
 import {
@@ -20,7 +20,7 @@ import {
   toggleSerialAutoPlay, serialOrderedScenes, closeMediaPreview, renderStoryPlayer,
 } from "./player.js";
 import { setPlayerState, playerState, serialState } from "./state.js";
-import { generateImage, generateVideo, resetAsset, requestJson } from "./api.js";
+import { generateImage, generateVideo, resetAsset, requestJson, batchGenerateImages, stopBatchImageGeneration } from "./api.js";
 import { exportProject, loadBundledExample, persistProject, importProject, openAssetFolder } from "./project-io.js";
 import { restoreProjectSnapshot } from "./project-model.js";
 
@@ -174,6 +174,15 @@ export function bindEvents() {
   $("#generateVideoBtn").addEventListener("click", generateVideo);
   $("#resetImageBtn").addEventListener("click", () => resetAsset("image"));
   $("#resetVideoBtn").addEventListener("click", () => resetAsset("video"));
+  $("#batchImageBtn")?.addEventListener("click", () => {
+    const btn = $("#batchImageBtn");
+    if (btn?.classList.contains("generating")) stopBatchImageGeneration();
+    else batchGenerateImages();
+  });
+
+  // 全屏展开/收起 项目设定
+  $("#toggleAllSettingsBtn")?.addEventListener("click", () => openProjectOverview());
+  $("#closeOverviewBtn")?.addEventListener("click", () => closeProjectOverview());
 
   // 项目管理
   $("#exportBtn").addEventListener("click", exportProject);
@@ -184,6 +193,22 @@ export function bindEvents() {
   $("#importInput").addEventListener("change", (event) => { if (event.target.files[0]) importProject(event.target.files[0]); event.target.value = ""; });
   $("#openProjectFolderBtn").addEventListener("click", () => openAssetFolder());
   $("#openSceneFolderBtn").addEventListener("click", () => { const scene = selectedScene(); if (scene) openAssetFolder(scene.id); });
+
+  // 顶部"更多"下拉菜单
+  const moreDropdown = $("#moreActionsDropdown");
+  const moreBtn = $("#moreActionsBtn");
+  if (moreBtn && moreDropdown) {
+    moreBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      moreDropdown.classList.toggle("open");
+    });
+    moreDropdown.querySelectorAll(".top-dropdown-menu .button").forEach((btn) => {
+      btn.addEventListener("click", () => moreDropdown.classList.remove("open"));
+    });
+    document.addEventListener("click", (e) => {
+      if (!moreDropdown.contains(e.target)) moreDropdown.classList.remove("open");
+    });
+  }
 
   // 表单同步
   [elements.projectTitle, elements.projectSynopsis, elements.projectGenre, elements.projectAspect,
@@ -208,6 +233,10 @@ export function bindEvents() {
   [elements.sceneTransition, elements.sceneEntryState, elements.sceneExitState].forEach((element) => element?.addEventListener("change", syncEditorToScene));
   [elements.sceneDuration, elements.sceneDialogue].forEach((element) => element.addEventListener("input", () => updateDialogueTiming()));
   ["sceneEpisode", "sceneEpisodeOrder"].forEach((id) => {
+    const el = $(`#${id}`);
+    if (el) el.addEventListener("change", syncEditorToScene);
+  });
+  ["sceneSceneCard", "sceneCharacters"].forEach((id) => {
     const el = $(`#${id}`);
     if (el) el.addEventListener("change", syncEditorToScene);
   });

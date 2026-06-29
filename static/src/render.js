@@ -3,6 +3,7 @@ import { escapeHtml, showToast, spokenCharacterCount, dialogueBudget, choiceUid 
 import {
   selectedScene, orderedScenes, activeEpisode, serialSceneEntries,
   findSceneAcrossProject, saveProject,
+  normalizeCharacterCard, characterCardToText, normalizeSceneCard,
 } from "./project-model.js";
 import {
   inferEntryState, inferExitState, serialSceneNeighbors,
@@ -13,12 +14,383 @@ import { renderEpisodeList } from "./episodes.js";
 import { updateSerialEstimate } from "./draft.js";
 import {
   proxyMediaUrl, downloadMediaUrl, saveAsset, stopTask, resumeTask, requestJson,
+  generateCharacterImage, stopCharacterImageTask,
+  generateSceneCardImage, stopSceneCardImageTask,
 } from "./api.js";
 import { openMediaPreview } from "./player.js";
 
 // ─────────────────────────────────────────────
+//  独立图片放大预览（不依赖 player.js，避免循环依赖问题）
+// ─────────────────────────────────────────────
+function showImagePreview(src, title) {
+  let overlay = document.getElementById("_imgZoomOverlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "_imgZoomOverlay";
+    overlay.className = "img-zoom-overlay";
+    overlay.addEventListener("click", () => { overlay.style.display = "none"; overlay.innerHTML = ""; });
+    document.body.appendChild(overlay);
+  }
+  overlay.innerHTML = "";
+  const img = document.createElement("img");
+  img.src = src;
+  img.alt = title || "图片预览";
+  overlay.appendChild(img);
+  const hint = document.createElement("span");
+  hint.textContent = "点击任意处关闭";
+  hint.className = "img-zoom-hint";
+  overlay.appendChild(hint);
+  overlay.style.display = "flex";
+}
+
+// ─────────────────────────────────────────────
+//  角色卡面板（多角色结构化编辑）
+//  渲染 project.meta.characters，支持增删改，实时同步兼容字段 meta.character
+// ─────────────────────────────────────────────
+export function renderCharacterPanel(target, openAll) {
+  const overviewOpen = document.body.classList.contains("overview-open");
+  if (!target) target = overviewOpen ? "#overviewCharacterPanel" : "#characterPanel";
+  if (openAll === undefined) openAll = overviewOpen;
+  const panel = $(target);
+  if (!panel) return;
+  const characters = Array.isArray(project.meta.characters) ? project.meta.characters : [];
+  const fields = [
+    ["name", "姓名", 60],
+    ["ageRange", "年龄段", 40],
+    ["gender", "性别呈现", 40],
+    ["hair", "发型", 80],
+    ["outfit", "服装", 200],
+    ["props", "携带物品/特征", 200],
+    ["emotion", "情绪基调", 80],
+    ["performance", "表演风格", 80],
+  ];
+  panel.innerHTML = (characters.length > 1 ? `<div class="card-toggle-all" data-target="${target}">全部展开 / 收起</div>` : "") + characters.map((card, index) => `
+    <details class="character-card" data-char-id="${escapeHtml(card.id)}"${openAll || index === 0 ? " open" : ""}>
+      <summary>
+        <strong>角色 ${index + 1}${card.name ? " · " + escapeHtml(card.name) : ""}</strong>
+        <button type="button" class="text-button remove-char" data-char-id="${escapeHtml(card.id)}" title="删除该角色">删除</button>
+      </summary>
+      <div class="char-portrait">
+        ${card.imageStatus === "working"
+          ? `<div class="char-portrait-loading"><span class="spinner"></span>角色设定图生成中…</div>
+             <button type="button" class="button ghost wide stop-char-img" data-char-id="${escapeHtml(card.id)}">停止</button>`
+          : card.imageUrl
+          ? `<div class="char-portrait-img-wrap">
+               <img src="${proxyMediaUrl(card.imageUrl)}" alt="${escapeHtml(card.name)}设定图" />
+               <button type="button" class="char-img-zoom" data-img-src="${escapeHtml(proxyMediaUrl(card.imageUrl))}" data-img-title="${escapeHtml(card.name + ' · 设定图')}" title="放大查看">⤢</button>
+             </div>
+             <button type="button" class="button ghost wide regen-char-img" data-char-id="${escapeHtml(card.id)}">重新生成</button>`
+          : `<button type="button" class="button ghost wide gen-char-img" data-char-id="${escapeHtml(card.id)}">生成角色设定图</button>`
+        }
+      </div>
+      <div class="char-grid">
+        ${fields.map(([key, label, maxlen]) => `
+          <label>${label}<input class="char-field" data-field="${key}" value="${escapeHtml(card[key] || "")}" maxlength="${maxlen}"></label>
+        `).join("")}
+      </div>
+      <label>备注/补充<textarea class="char-field" data-field="notes" rows="2" maxlength="1000">${escapeHtml(card.notes || "")}</textarea></label>
+    </details>
+  `).join("") + `<button type="button" class="button ghost wide add-character-btn">＋ 添加角色</button>`;
+
+  // 输入实时更新角色卡数据与兼容字段
+  panel.querySelectorAll(".char-field").forEach((input) => {
+    input.addEventListener("input", () => {
+      const cardEl = input.closest(".character-card");
+      const id = cardEl.dataset.charId;
+      const card = project.meta.characters.find((c) => c.id === id);
+      if (!card) return;
+      card[input.dataset.field] = input.value;
+      // 第一个角色卡同步到兼容字段 meta.character（供 draft/app.py 等旧逻辑读取）
+      if (project.meta.characters[0] && id === project.meta.characters[0].id) {
+        project.meta.character = characterCardToText(card);
+        if (elements.projectCharacter) elements.projectCharacter.value = project.meta.character;
+      }
+      saveProject();
+    });
+  });
+  // 删除角色
+  panel.querySelectorAll(".remove-char").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.charId;
+      project.meta.characters = project.meta.characters.filter((c) => c.id !== id);
+      project.meta.character = project.meta.characters.length
+        ? characterCardToText(project.meta.characters[0])
+        : "";
+      if (elements.projectCharacter) elements.projectCharacter.value = project.meta.character;
+      renderCharacterPanel(target, openAll);
+      saveProject();
+    });
+  });
+  // 生成 / 重新生成角色设定图
+  panel.querySelectorAll(".gen-char-img, .regen-char-img").forEach((btn) => {
+    btn.addEventListener("click", () => generateCharacterImage(btn.dataset.charId));
+  });
+  // 停止角色图生成
+  panel.querySelectorAll(".stop-char-img").forEach((btn) => {
+    btn.addEventListener("click", () => stopCharacterImageTask(btn.dataset.charId));
+  });
+  // 点击放大按钮预览
+  panel.querySelectorAll(".char-img-zoom").forEach((btn) => {
+    btn.addEventListener("click", () => showImagePreview(btn.dataset.imgSrc, btn.dataset.imgTitle || "角色设定图"));
+  });
+  // 添加角色
+  const addBtn = panel.querySelector(".add-character-btn");
+  if (addBtn) addBtn.addEventListener("click", () => {
+    project.meta.characters.push(normalizeCharacterCard({ name: "新角色" }));
+    renderCharacterPanel(target, openAll);
+    saveProject();
+  });
+  // 全部展开/收起
+  const charToggle = panel.querySelector(".card-toggle-all");
+  if (charToggle) charToggle.addEventListener("click", () => {
+    const cards = panel.querySelectorAll(".character-card");
+    const allOpen = Array.from(cards).every((c) => c.hasAttribute("open"));
+    cards.forEach((c) => { if (allOpen) c.removeAttribute("open"); else c.setAttribute("open", ""); });
+  });
+}
+
+// ─────────────────────────────────────────────
+//  场景卡面板（多场景结构化编辑）
+// ─────────────────────────────────────────────
+export function renderSceneCardPanel(target, openAll) {
+  const overviewOpen = document.body.classList.contains("overview-open");
+  if (!target) target = overviewOpen ? "#overviewSceneCardPanel" : "#sceneCardPanel";
+  if (openAll === undefined) openAll = overviewOpen;
+  const panel = $(target);
+  if (!panel) return;
+  const cards = Array.isArray(project.meta.sceneCards) ? project.meta.sceneCards : [];
+  const fields = [
+    ["name", "场景名称", 60],
+    ["type", "场景类型", 40],
+    ["lighting", "光照", 200],
+    ["colorTone", "色调", 80],
+    ["atmosphere", "氛围", 200],
+    ["environment", "环境细节", 500],
+    ["timeOfDay", "时间/天气", 80],
+  ];
+  panel.innerHTML = (cards.length > 1 ? `<div class="card-toggle-all" data-target="${target}">全部展开 / 收起</div>` : "") + cards.map((card, index) => `
+    <details class="character-card scene-card" data-scene-id="${escapeHtml(card.id)}"${openAll || index === 0 ? " open" : ""}>
+      <summary>
+        <strong>场景 ${index + 1}${card.name ? " · " + escapeHtml(card.name) : ""}</strong>
+        <button type="button" class="text-button remove-char" data-scene-id="${escapeHtml(card.id)}" title="删除该场景">删除</button>
+      </summary>
+      <div class="char-portrait">
+        ${card.imageStatus === "working"
+          ? `<div class="char-portrait-loading"><span class="spinner"></span>场景参考图生成中…</div>
+             <button type="button" class="button ghost wide stop-scene-img" data-scene-id="${escapeHtml(card.id)}">停止</button>`
+          : card.imageUrl
+          ? `<div class="char-portrait-img-wrap">
+               <img src="${proxyMediaUrl(card.imageUrl)}" alt="${escapeHtml(card.name)}参考图" />
+               <button type="button" class="char-img-zoom" data-img-src="${escapeHtml(proxyMediaUrl(card.imageUrl))}" data-img-title="${escapeHtml(card.name + ' · 参考图')}" title="放大查看">⤢</button>
+             </div>
+             <button type="button" class="button ghost wide regen-scene-img" data-scene-id="${escapeHtml(card.id)}">重新生成</button>`
+          : `<button type="button" class="button ghost wide gen-scene-img" data-scene-id="${escapeHtml(card.id)}">生成场景参考图</button>`
+        }
+      </div>
+      <div class="char-grid">
+        ${fields.map(([key, label, maxlen]) => `
+          <label>${label}<input class="scene-field" data-field="${key}" value="${escapeHtml(card[key] || "")}" maxlength="${maxlen}"></label>
+        `).join("")}
+      </div>
+      <label>备注/补充<textarea class="scene-field" data-field="notes" rows="2" maxlength="1000">${escapeHtml(card.notes || "")}</textarea></label>
+    </details>
+  `).join("") + `<button type="button" class="button ghost wide add-scene-card-btn">＋ 添加场景</button>`;
+
+  panel.querySelectorAll(".scene-field").forEach((input) => {
+    input.addEventListener("input", () => {
+      const cardEl = input.closest(".scene-card");
+      const id = cardEl.dataset.sceneId;
+      const card = project.meta.sceneCards.find((c) => c.id === id);
+      if (!card) return;
+      card[input.dataset.field] = input.value;
+      saveProject();
+    });
+  });
+  panel.querySelectorAll(".remove-char").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.sceneId;
+      project.meta.sceneCards = project.meta.sceneCards.filter((c) => c.id !== id);
+      renderSceneCardPanel(target, openAll);
+      saveProject();
+    });
+  });
+  panel.querySelectorAll(".gen-scene-img, .regen-scene-img").forEach((btn) => {
+    btn.addEventListener("click", () => generateSceneCardImage(btn.dataset.sceneId));
+  });
+  panel.querySelectorAll(".stop-scene-img").forEach((btn) => {
+    btn.addEventListener("click", () => stopSceneCardImageTask(btn.dataset.sceneId));
+  });
+  // 点击放大按钮预览
+  panel.querySelectorAll(".char-img-zoom").forEach((btn) => {
+    btn.addEventListener("click", () => showImagePreview(btn.dataset.imgSrc, btn.dataset.imgTitle || "场景参考图"));
+  });
+  const addBtn = panel.querySelector(".add-scene-card-btn");
+  if (addBtn) addBtn.addEventListener("click", () => {
+    project.meta.sceneCards.push(normalizeSceneCard({ name: "新场景" }));
+    renderSceneCardPanel(target, openAll);
+    saveProject();
+  });
+  // 全部展开/收起
+  const sceneToggle = panel.querySelector(".card-toggle-all");
+  if (sceneToggle) sceneToggle.addEventListener("click", () => {
+    const cards = panel.querySelectorAll(".scene-card");
+    const allOpen = Array.from(cards).every((c) => c.hasAttribute("open"));
+    cards.forEach((c) => { if (allOpen) c.removeAttribute("open"); else c.setAttribute("open", ""); });
+  });
+}
+
+// ─────────────────────────────────────────────
+//  全屏项目概览编辑
+// ─────────────────────────────────────────────
+export function renderProjectOverview() {
+  // 基础设定
+  const basic = $("#overviewBasicSettings");
+  if (basic) {
+    const genreOpts = ["科幻悬疑", "奇幻冒险", "都市情感", "恐怖生存", "历史传奇"];
+    const aspectOpts = [
+      { value: "16:9", label: "16:9 横屏" },
+      { value: "9:16", label: "9:16 竖屏" },
+      { value: "1:1", label: "1:1 方形" },
+    ];
+    basic.innerHTML = `
+      <div class="overview-basic-row">
+        <label>片名<input id="ovTitle" value="${escapeHtml(project.meta.title || "")}" maxlength="80"></label>
+        <label>类型<select id="ovGenre">${genreOpts.map((g) => `<option${g === project.meta.genre ? " selected" : ""}>${g}</option>`).join("")}</select></label>
+        <label>画幅<select id="ovAspect">${aspectOpts.map((a) => `<option value="${a.value}"${a.value === project.meta.aspectRatio ? " selected" : ""}>${a.label}</option>`).join("")}</select></label>
+      </div>
+      <label>故事梗概<textarea id="ovSynopsis" rows="2">${escapeHtml(project.meta.synopsis || "")}</textarea></label>
+      <label>视觉风格<textarea id="ovStyle" rows="1">${escapeHtml(project.meta.visualStyle || "")}</textarea></label>
+    `;
+    const syncText = (sel, key, sidebarEl) => {
+      const input = $(sel);
+      if (!input) return;
+      input.addEventListener("input", () => {
+        project.meta[key] = input.value;
+        if (sidebarEl) sidebarEl.value = input.value;
+        saveProject();
+      });
+    };
+    syncText("#ovTitle", "title", elements.projectTitle);
+    syncText("#ovSynopsis", "synopsis", elements.projectSynopsis);
+    syncText("#ovStyle", "visualStyle", elements.projectStyle);
+    const genreSelect = $("#ovGenre");
+    if (genreSelect) genreSelect.addEventListener("change", () => {
+      project.meta.genre = genreSelect.value;
+      if (elements.projectGenre) elements.projectGenre.value = genreSelect.value;
+      saveProject();
+    });
+    const aspectSelect = $("#ovAspect");
+    if (aspectSelect) aspectSelect.addEventListener("change", () => {
+      project.meta.aspectRatio = aspectSelect.value;
+      if (elements.projectAspect) elements.projectAspect.value = aspectSelect.value;
+      saveProject();
+    });
+  }
+
+  // 角色卡
+  renderCharacterPanel("#overviewCharacterPanel", true);
+
+  // 场景卡
+  renderSceneCardPanel("#overviewSceneCardPanel", true);
+
+  // 剧本（分镜列表）
+  const scriptList = $("#overviewSceneList");
+  if (scriptList) {
+    const scenes = orderedScenes();
+    if (!scenes.length) {
+      scriptList.innerHTML = `<p class="overview-empty">暂无分镜。请先在主界面生成剧情草案。</p>`;
+    } else {
+      const shotOpts = ["大全景", "全景", "中景", "近景", "特写"];
+      const durationOpts = [4, 6, 8, 10, 12, 15];
+      scriptList.innerHTML = scenes.map((scene, i) => `
+        <div class="overview-scene-item" data-scene-id="${escapeHtml(scene.id)}">
+          <div class="overview-scene-header">
+            <span class="overview-scene-num">${i + 1}</span>
+            <input class="overview-scene-title" value="${escapeHtml(scene.title || "")}" maxlength="80" placeholder="镜头标题">
+            <select class="overview-scene-shot">${shotOpts.map((s) => `<option${s === scene.shot ? " selected" : ""}>${s}</option>`).join("")}</select>
+            <select class="overview-scene-duration">${durationOpts.map((d) => `<option value="${d}"${d === scene.duration ? " selected" : ""}>${d}s</option>`).join("")}</select>
+          </div>
+          <textarea class="overview-scene-action" rows="2" maxlength="6000" placeholder="动作描述">${escapeHtml(scene.action || "")}</textarea>
+          <textarea class="overview-scene-dialogue" rows="1" maxlength="3000" placeholder="对白">${escapeHtml(scene.dialogue || "")}</textarea>
+        </div>
+      `).join("");
+      scriptList.querySelectorAll(".overview-scene-item").forEach((item) => {
+        const sceneId = item.dataset.sceneId;
+        const scene = scenes.find((s) => s.id === sceneId);
+        if (!scene) return;
+        item.querySelector(".overview-scene-title").addEventListener("input", (e) => {
+          scene.title = e.target.value;
+          saveProject();
+        });
+        item.querySelector(".overview-scene-shot").addEventListener("change", (e) => {
+          scene.shot = e.target.value;
+          saveProject();
+        });
+        item.querySelector(".overview-scene-duration").addEventListener("change", (e) => {
+          scene.duration = Number(e.target.value);
+          saveProject();
+        });
+        item.querySelector(".overview-scene-action").addEventListener("input", (e) => {
+          scene.action = e.target.value;
+          saveProject();
+        });
+        item.querySelector(".overview-scene-dialogue").addEventListener("input", (e) => {
+          scene.dialogue = e.target.value;
+          saveProject();
+        });
+      });
+    }
+  }
+}
+
+export function openProjectOverview() {
+  const overlay = $("#projectOverview");
+  if (!overlay) return;
+  renderProjectOverview();
+  overlay.hidden = false;
+  document.body.classList.add("overview-open");
+}
+
+export function closeProjectOverview() {
+  const overlay = $("#projectOverview");
+  if (!overlay) return;
+  overlay.hidden = true;
+  document.body.classList.remove("overview-open");
+  renderCharacterPanel();
+  renderSceneCardPanel();
+  render();
+}
+
+// ─────────────────────────────────────────────
 //  编辑器渲染
 // ─────────────────────────────────────────────
+function renderSceneCardSelector(scene) {
+  const select = $("#sceneSceneCard");
+  if (!select) return;
+  const cards = Array.isArray(project.meta.sceneCards) ? project.meta.sceneCards : [];
+  const options = ['<option value="">未指定场景卡</option>'];
+  cards.forEach((card) => {
+    const selected = card.id === scene.sceneCardId ? " selected" : "";
+    const hasImage = Boolean(card.imageUrl);
+    options.push(`<option value="${escapeHtml(card.id)}"${selected}>${escapeHtml(card.name)}${hasImage ? "（有参考图）" : ""}</option>`);
+  });
+  select.innerHTML = options.join("");
+}
+
+function renderCharacterSelector(scene) {
+  const select = $("#sceneCharacters");
+  if (!select) return;
+  const characters = Array.isArray(project.meta.characters) ? project.meta.characters : [];
+  const selectedIds = Array.isArray(scene.characterIds) ? scene.characterIds : [];
+  select.innerHTML = characters.map((card) => {
+    const selected = selectedIds.includes(card.id) ? " selected" : "";
+    const hasImage = Boolean(card.imageUrl);
+    return `<option value="${escapeHtml(card.id)}"${selected}>${escapeHtml(card.name)}${hasImage ? "（有设定图）" : ""}</option>`;
+  }).join("");
+}
+
 export function renderEditor() {
   const scene = selectedScene();
   elements.sceneEditor.hidden = !scene;
@@ -29,6 +401,8 @@ export function renderEditor() {
   elements.sceneDuration.value = String(scene.duration);
   elements.sceneAction.value = scene.action;
   elements.sceneDialogue.value = scene.dialogue;
+  renderSceneCardSelector(scene);
+  renderCharacterSelector(scene);
   updateDialogueTiming(scene);
   if (currentMode === "interactive") {
     renderFlowEditor(scene);
@@ -265,6 +639,8 @@ export function syncEditorToScene() {
     action: elements.sceneAction.value.trim(),
     dialogue: elements.sceneDialogue.value.trim(),
     referenceSceneId: elements.sceneReference.value,
+    sceneCardId: $("#sceneSceneCard")?.value || "",
+    characterIds: Array.from($("#sceneCharacters")?.selectedOptions || []).map((opt) => opt.value),
     imagePrompt: elements.sceneImagePrompt.value.trim(),
   };
   if (currentMode === "interactive") {

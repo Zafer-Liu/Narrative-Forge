@@ -26,12 +26,17 @@
       <button id="browseTreeBtn" class="button ghost">剧情树</button>
       <button id="previewStoryBtn" class="button primary" data-interactive-only>试玩剧情</button>
       <button id="previewSerialBtn" class="button primary" data-serial-only hidden>预览短剧</button>
-      <button id="exportPlayerBtn" class="button ghost">导出试玩包</button>
-      <button id="openProjectFolderBtn" class="button ghost">打开项目文件夹</button>
-      <button id="importBtn" class="button ghost">导入项目</button>
       <button id="saveProjectBtn" class="button ghost">保存项目</button>
-      <button id="restoreProjectBtn" class="button ghost" hidden>撤销覆盖</button>
-      <button id="exportBtn" class="button ghost">导出 JSON</button>
+      <div class="top-dropdown" id="moreActionsDropdown">
+        <button id="moreActionsBtn" class="button ghost" type="button">更多 <span class="caret">▾</span></button>
+        <div class="top-dropdown-menu" id="moreActionsMenu">
+          <button id="exportPlayerBtn" class="button ghost">导出试玩包</button>
+          <button id="openProjectFolderBtn" class="button ghost">打开项目文件夹</button>
+          <button id="importBtn" class="button ghost">导入项目</button>
+          <button id="exportBtn" class="button ghost">导出 JSON</button>
+          <button id="restoreProjectBtn" class="button ghost" hidden>撤销覆盖</button>
+        </div>
+      </div>
       <input id="importInput" type="file" accept="application/json" hidden>
     </div>
   </header>
@@ -39,26 +44,46 @@
   <main class="workspace">
     <aside class="project-panel panel">
       <div class="panel-title"><span>01</span><h2>项目设定</h2></div>
-      <section class="example-card">
-        <div>
-          <strong>星海回声</strong>
-          <span>内置互动影游案例与完整试玩包</span>
-        </div>
-        <div class="example-actions">
-          <button id="loadExampleBtn" class="button ghost">加载项目</button>
-          <a class="button primary" href="/samples/star-sea-echo-player/index.html" target="_blank" rel="noopener">试玩完整包</a>
-        </div>
-      </section>
-      <label>片名<input id="projectTitle" value="星海回声" maxlength="80"></label>
-      <label>故事梗概<textarea id="projectSynopsis" rows="5">一名失忆的领航员在废弃空间站醒来，必须在空间站坠入恒星前找回身份，并决定是否唤醒沉睡的人工智能。</textarea></label>
-      <div class="field-row">
-        <label>类型<select id="projectGenre"><option>科幻悬疑</option><option>奇幻冒险</option><option>都市情感</option><option>恐怖生存</option><option>历史传奇</option></select></label>
-        <label>画幅<select id="projectAspect"><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option><option value="1:1">1:1 方形</option></select></label>
-      </div>
-      <label>视觉风格<textarea id="projectStyle" rows="3">电影级写实科幻，深蓝与琥珀色调，体积光，精密机械细节，统一角色设计</textarea></label>
-      <label>主角设定<textarea id="projectCharacter" rows="3">林默，28岁亚洲女性领航员，黑色短发，左眉有细小伤痕，穿旧白色宇航服与橙色生命维持背包</textarea></label>
+      <button id="toggleAllSettingsBtn" class="button ghost small toggle-all-settings">全屏展开</button>
+      <details class="setting-group">
+        <summary>示例项目</summary>
+        <section class="example-card">
+          <div>
+            <strong>星海回声</strong>
+            <span>内置互动影游案例与完整试玩包</span>
+          </div>
+          <div class="example-actions">
+            <button id="loadExampleBtn" class="button ghost">加载项目</button>
+            <a class="button primary" href="/samples/star-sea-echo-player/index.html" target="_blank" rel="noopener">试玩完整包</a>
+          </div>
+        </section>
+      </details>
 
-      <!-- 互动影游专属 -->
+      <details class="setting-group" open>
+        <summary>基础设定</summary>
+        <label>片名<input id="projectTitle" value="星海回声" maxlength="80"></label>
+        <label>故事梗概<textarea id="projectSynopsis" rows="5">一名失忆的领航员在废弃空间站醒来，必须在空间站坠入恒星前找回身份，并决定是否唤醒沉睡的人工智能。</textarea></label>
+        <div class="field-row">
+          <label>类型<select id="projectGenre"><option>科幻悬疑</option><option>奇幻冒险</option><option>都市情感</option><option>恐怖生存</option><option>历史传奇</option></select></label>
+          <label>画幅<select id="projectAspect"><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option><option value="1:1">1:1 方形</option></select></label>
+        </div>
+        <label>视觉风格<textarea id="projectStyle" rows="3">电影级写实科幻，深蓝与琥珀色调，体积光，精密机械细节，统一角色设计</textarea></label>
+      </details>
+
+      <details class="setting-group" open>
+        <summary><strong>角色卡</strong><small>结构化角色设定，支撑跨镜头角色连续性</small></summary>
+        <div id="characterPanel" class="character-panel"></div>
+        <input id="projectCharacter" type="hidden" value="林默，28岁亚洲女性领航员，黑色短发，左眉有细小伤痕，穿旧白色宇航服与橙色生命维持背包">
+      </details>
+
+      <details class="setting-group" open>
+        <summary><strong>场景卡</strong><small>结构化场景设定，支撑跨镜头环境连续性</small></summary>
+        <div id="sceneCardPanel" class="character-panel"></div>
+      </details>
+
+      <details class="setting-group" open>
+        <summary>剧情结构</summary>
+        <!-- 互动影游专属 -->
       <div id="interactiveSettings" class="mode-section">
         <div class="field-row">
           <label>剧情树深度<select id="projectTreeDepth"><option value="2">2 层</option><option value="3" selected>3 层</option><option value="4">4 层</option><option value="5">5 层</option></select></label>
@@ -110,8 +135,9 @@
           </div>
         </section>
       </div>
+      </details>
 
-      <details class="model-settings" open>
+      <details class="setting-group model-settings">
         <summary>模型供应商配置</summary>
         <section class="provider-settings">
           <strong>文本模型</strong><small>OpenAI Chat Completions 兼容</small>
@@ -160,6 +186,7 @@
       <div class="panel-title row-title">
         <div><span>02</span><h2 id="storyboardTitle">分镜列表</h2></div>
         <div class="storyboard-actions">
+          <button id="batchImageBtn" class="button ghost small" title="为所有未生成关键帧的镜头批量生成图片">批量生成关键帧</button>
           <!-- 互动影游专属 -->
           <span id="interactiveListActions">
             <button id="addSceneBtn" class="icon-button" title="添加镜头">＋</button>
@@ -185,6 +212,10 @@
           <label>镜头标题<input id="sceneTitle" maxlength="80"></label>
           <label>景别<select id="sceneShot"><option>大全景</option><option>全景</option><option>中景</option><option>近景</option><option>特写</option></select></label>
           <label>时长<select id="sceneDuration"><option value="4">4 秒</option><option value="6">6 秒</option><option value="8" selected>8 秒</option><option value="10">10 秒</option><option value="12">12 秒</option><option value="15">15 秒</option></select></label>
+        </div>
+        <div class="field-row">
+          <label>场景卡<select id="sceneSceneCard"><option value="">未指定</option></select></label>
+          <label>出场角色<select id="sceneCharacters" multiple size="4"><small class="hint">按住 Ctrl / Cmd 多选</small></select></label>
         </div>
         <label>剧情与表演<textarea id="sceneAction" rows="3"></textarea></label>
         <label>对白 / 旁白<textarea id="sceneDialogue" rows="2"></textarea><small id="dialogueTimingHint" class="dialogue-timing-hint"></small></label>
@@ -373,6 +404,32 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="/dist/bundle.js?v=36"></script>
+
+  <div id="projectOverview" class="project-overview" hidden>
+    <div class="overview-header">
+      <h2>项目全览编辑</h2>
+      <button id="closeOverviewBtn" class="button ghost">✕ 关闭</button>
+    </div>
+    <div class="overview-grid">
+      <section class="overview-section overview-basic">
+        <h3>基础设定</h3>
+        <div id="overviewBasicSettings" class="overview-content"></div>
+      </section>
+      <section class="overview-section overview-characters">
+        <h3>角色</h3>
+        <div id="overviewCharacterPanel" class="character-panel"></div>
+      </section>
+      <section class="overview-section overview-scenes">
+        <h3>场景</h3>
+        <div id="overviewSceneCardPanel" class="character-panel"></div>
+      </section>
+      <section class="overview-section overview-script">
+        <h3>剧本</h3>
+        <div id="overviewSceneList" class="overview-content"></div>
+      </section>
+    </div>
+  </div>
+
+  <script src="/dist/bundle.js?v=48"></script>
 </body>
 </html>
